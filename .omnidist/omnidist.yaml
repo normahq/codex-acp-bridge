@@ -5,8 +5,7 @@ profiles:
       main: ./cmd/codex-acp-bridge
     readme-path: ./cmd/codex-acp-bridge/README.md
     version:
-      source: fixed
-      fixed: 0.0.3
+      source: git-tag
     targets:
       - os: darwin
         arch: amd64
