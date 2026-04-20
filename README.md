@@ -9,7 +9,7 @@
 - Supports ACP `session/set_model` and `session/set_mode`.
 - Supports prompt text and image blocks.
 - Supports per-session MCP servers from ACP `mcpServers` (`stdio`, `http`; rejects `sse`).
-- Supports strict session metadata mapping via `session/new._meta.codex`.
+- Supports strict session metadata mapping via `session/new._meta.codex` (documented in usage docs).
 
 ## Installation
 
@@ -41,22 +41,7 @@ Flags:
   Default: `norma-codex-acp-bridge`.
 - `--debug`: Enable debug logging.
 
-Session metadata mapping (`session/new._meta.codex`):
-
-- `sandbox` -> `thread/start.sandbox`
-- `approvalPolicy` -> `thread/start.approvalPolicy`
-- `approvalsReviewer` -> `thread/start.approvalsReviewer`
-- `baseInstructions` -> `thread/start.baseInstructions`
-- `developerInstructions` -> `thread/start.developerInstructions`
-- `modelProvider` -> `thread/start.modelProvider`
-- `personality` -> `thread/start.personality`
-- `serviceTier` -> `thread/start.serviceTier`
-- `ephemeral` -> `thread/start.ephemeral`
-- `profile` -> `thread/start.config.profile`
-- `compactPrompt` -> `thread/start.config.compact_prompt`
-- `config` -> merged into `thread/start.config`
-
 Documentation:
 
-- [docs/codex-acp-bridge.md](docs/codex-acp-bridge.md)
-- [docs/codex-acp-bridge-json-api.md](docs/codex-acp-bridge-json-api.md)
+- [Usage](docs/usage.md)
+- [JSON API](docs/json-api.md)

@@ -34,8 +34,8 @@ go tool golangci-lint run
 
 - Product/usage docs are rooted in `README.md`.
 - Protocol details are in:
-  - `docs/codex-acp-bridge.md`
-  - `docs/codex-acp-bridge-json-api.md`
+  - `docs/usage.md`
+  - `docs/json-api.md`
 
 ## Release
 

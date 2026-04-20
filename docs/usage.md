@@ -1,4 +1,4 @@
-# Codex ACP Bridge
+# Usage
 
 This command runs the Codex bridge backend and exposes it as an ACP agent over stdio.
 

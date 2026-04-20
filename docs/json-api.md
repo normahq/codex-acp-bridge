@@ -1,4 +1,4 @@
-# Codex ACP (Bridge Backend) JSON API Spec
+# JSON API Specification
 
 Status: draft  
 Date: 2026-04-12  
