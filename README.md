@@ -8,7 +8,7 @@
 
 **Turn Codex into a full-scale ACP server.**
 
-Zero bridge dependencies. No bridge API keys. Uses your existing Codex subscription.
+Zero deps. No OpenAI API keys. Uses your existing Codex subscription.
 
 `codex-acp-bridge` exposes `codex app-server` as ACP over stdio, so ACP clients can run Codex with native session and model flows.
 
