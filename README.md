@@ -51,11 +51,11 @@ Try with ACP tools:
 
 ```bash
 # Inspect initialize/session payloads
-npx @normahq/acp-dump -- npx -y @normahq/codex-acp-bridge@latest
-npx @normahq/acp-dump --json -- npx -y @normahq/codex-acp-bridge@latest
+npx -y @normahq/acp-dump -- npx -y @normahq/codex-acp-bridge@latest
+npx -y @normahq/acp-dump --json -- npx -y @normahq/codex-acp-bridge@latest
 
 # Interactive ACP session
-npx @normahq/acp-repl -- npx -y @normahq/codex-acp-bridge@latest
+npx -y @normahq/acp-repl -- npx -y @normahq/codex-acp-bridge@latest
 
 # If installed globally:
 acp-dump -- codex-acp-bridge
