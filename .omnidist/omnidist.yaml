@@ -3,7 +3,7 @@ profiles:
     tool:
       name: codex-acp-bridge
       main: ./cmd/codex-acp-bridge
-    readme-path: ./cmd/codex-acp-bridge/README.md
+    readme-path: ./README.md
     version:
       source: git-tag
     targets:
