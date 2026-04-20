@@ -6,16 +6,38 @@
 [![coverage](https://codecov.io/gh/normahq/codex-acp-bridge/branch/main/graph/badge.svg)](https://codecov.io/gh/normahq/codex-acp-bridge)
 [![npm version](https://img.shields.io/npm/v/%40normahq%2Fcodex-acp-bridge)](https://www.npmjs.com/package/@normahq/codex-acp-bridge)
 
-`codex-acp-bridge` runs the Codex bridge backend and exposes it as an ACP agent over stdio.
+**Turn Codex into a full-scale ACP server.**
 
-## Features
+Zero bridge dependencies. No bridge API keys. Uses your existing Codex subscription.
 
-- Exposes Codex app-server as ACP over stdio.
-- Supports ACP `session/new.models` from `model/list`.
-- Supports ACP `session/set_model` and `session/set_mode`.
-- Supports prompt text and image blocks.
-- Supports per-session MCP servers from ACP `mcpServers` (`stdio`, `http`; rejects `sse`).
-- Supports strict session metadata mapping via `session/new._meta.codex` (documented in usage docs).
+`codex-acp-bridge` exposes `codex app-server` as ACP over stdio, so ACP clients can run Codex with native session and model flows.
+
+## Requirements
+
+- `codex` CLI in `PATH`.
+- Authenticated Codex session on the machine running the bridge.
+- Active Codex subscription.
+
+## 60-Second Quickstart
+
+Run the bridge:
+
+```bash
+npx -y @normahq/codex-acp-bridge@latest
+```
+
+Inspect ACP initialize/session payloads:
+
+```bash
+npx -y @normahq/acp-dump -- npx -y @normahq/codex-acp-bridge@latest
+npx -y @normahq/acp-dump --json -- npx -y @normahq/codex-acp-bridge@latest
+```
+
+Start an interactive ACP session:
+
+```bash
+npx -y @normahq/acp-repl -- npx -y @normahq/codex-acp-bridge@latest
+```
 
 ## Installation
 
@@ -30,6 +52,15 @@ One-off run with npx:
 ```bash
 npx -y @normahq/codex-acp-bridge@latest
 ```
+
+## What "full-scale ACP server" means
+
+- Exposes Codex app-server as ACP over stdio.
+- Populates ACP `session/new.models` from `model/list`.
+- Supports ACP `session/set_model` and `session/set_mode`.
+- Supports text and image prompt blocks.
+- Supports per-session MCP servers from ACP `mcpServers` (`stdio`, `http`; rejects `sse`).
+- Supports strict session metadata mapping via `session/new._meta.codex`.
 
 ## Usage
 
@@ -47,17 +78,9 @@ Flags:
   Default: `norma-codex-acp-bridge`.
 - `--debug`: Enable debug logging.
 
-Try with ACP tools:
+If tools are installed globally:
 
 ```bash
-# Inspect initialize/session payloads
-npx -y @normahq/acp-dump -- npx -y @normahq/codex-acp-bridge@latest
-npx -y @normahq/acp-dump --json -- npx -y @normahq/codex-acp-bridge@latest
-
-# Interactive ACP session
-npx -y @normahq/acp-repl -- npx -y @normahq/codex-acp-bridge@latest
-
-# If installed globally:
 acp-dump -- codex-acp-bridge
 acp-repl -- codex-acp-bridge
 ```
