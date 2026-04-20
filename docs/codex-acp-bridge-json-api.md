@@ -6,7 +6,7 @@ Audience: `codex-acp-bridge` adapter maintainers
 
 ## Source of truth
 
-This document is code-first for Norma behavior:
+This document is code-first for codex-acp-bridge behavior:
 - backend schema shape comes from `codex backend` JSON schema output.
 - adapter projection semantics come from `internal/apps/codexacpbridge` implementation and tests.
 
@@ -19,7 +19,7 @@ Primary files:
 - `/tmp/codex-app-schema-docspec/ServerRequest.json`
 - `/tmp/codex-app-schema-docspec/*Response.json`
 
-This document does not require backend source internals; it documents observable backend schema plus current Norma adapter behavior.
+This document does not require backend source internals; it documents observable backend schema plus current bridge adapter behavior.
 
 ## API surface summary
 
