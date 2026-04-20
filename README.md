@@ -1,5 +1,10 @@
 # codex-acp-bridge
 
+[![test](https://github.com/normahq/codex-acp-bridge/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/normahq/codex-acp-bridge/actions/workflows/test.yml)
+[![lint](https://github.com/normahq/codex-acp-bridge/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/normahq/codex-acp-bridge/actions/workflows/lint.yml)
+[![release](https://github.com/normahq/codex-acp-bridge/actions/workflows/omnidist-release-codex-acp-bridge.yml/badge.svg)](https://github.com/normahq/codex-acp-bridge/actions/workflows/omnidist-release-codex-acp-bridge.yml)
+[![npm version](https://img.shields.io/npm/v/%40normahq%2Fcodex-acp-bridge)](https://www.npmjs.com/package/@normahq/codex-acp-bridge)
+
 `codex-acp-bridge` runs the Codex bridge backend and exposes it as an ACP agent over stdio.
 
 ## Features
