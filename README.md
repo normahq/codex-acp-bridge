@@ -47,6 +47,21 @@ Flags:
   Default: `norma-codex-acp-bridge`.
 - `--debug`: Enable debug logging.
 
+Try with ACP tools:
+
+```bash
+# Inspect initialize/session payloads
+npx @normahq/acp-dump -- npx -y @normahq/codex-acp-bridge@latest
+npx @normahq/acp-dump --json -- npx -y @normahq/codex-acp-bridge@latest
+
+# Interactive ACP session
+npx @normahq/acp-repl -- npx -y @normahq/codex-acp-bridge@latest
+
+# If installed globally:
+acp-dump -- codex-acp-bridge
+acp-repl -- codex-acp-bridge
+```
+
 Documentation:
 
 - [Usage](docs/usage.md)

@@ -26,6 +26,28 @@ codex-acp-bridge
 codex-acp-bridge --name team-codex
 ```
 
+## ACP Tooling Examples
+
+Use `acp-dump` to inspect ACP initialize/session behavior:
+
+```bash
+npx @normahq/acp-dump -- npx -y @normahq/codex-acp-bridge@latest
+npx @normahq/acp-dump --json -- npx -y @normahq/codex-acp-bridge@latest
+```
+
+Use `acp-repl` for an interactive ACP prompt session:
+
+```bash
+npx @normahq/acp-repl -- npx -y @normahq/codex-acp-bridge@latest
+```
+
+If tools are installed globally:
+
+```bash
+acp-dump -- codex-acp-bridge
+acp-repl -- codex-acp-bridge
+```
+
 ## Flags
 
 - `--name`:
