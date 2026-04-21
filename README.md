@@ -53,6 +53,14 @@ One-off run with npx:
 npx -y @normahq/codex-acp-bridge@latest
 ```
 
+## GitHub
+
+- Repository: https://github.com/normahq/codex-acp-bridge
+- Issues: https://github.com/normahq/codex-acp-bridge/issues
+- Releases: https://github.com/normahq/codex-acp-bridge/releases
+- Test workflow: https://github.com/normahq/codex-acp-bridge/actions/workflows/test.yml
+- Lint workflow: https://github.com/normahq/codex-acp-bridge/actions/workflows/lint.yml
+
 ## What "full-scale ACP server" means
 
 - Exposes Codex app-server as ACP over stdio.
@@ -87,5 +95,5 @@ acp-repl -- codex-acp-bridge
 
 Documentation:
 
-- [Usage](docs/usage.md)
-- [JSON API](docs/json-api.md)
+- [Usage](https://github.com/normahq/codex-acp-bridge/blob/main/docs/usage.md)
+- [JSON API](https://github.com/normahq/codex-acp-bridge/blob/main/docs/json-api.md)
