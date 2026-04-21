@@ -100,8 +100,9 @@ type appServerBackend struct {
 	pending   map[string]chan appServerRPCResponse
 	nextID    uint64
 
-	events chan appServerEvent
-	done   chan struct{}
+	events   chan appServerEvent
+	done     chan struct{}
+	readDone chan struct{}
 
 	finalizeOnce sync.Once
 	waitErr      error
@@ -170,12 +171,13 @@ func connectAppServerBackend(
 	}
 
 	backend := &appServerBackend{
-		cmd:     cmd,
-		stdin:   stdin,
-		logger:  logger,
-		pending: make(map[string]chan appServerRPCResponse),
-		events:  make(chan appServerEvent, 256),
-		done:    make(chan struct{}),
+		cmd:      cmd,
+		stdin:    stdin,
+		logger:   logger,
+		pending:  make(map[string]chan appServerRPCResponse),
+		events:   make(chan appServerEvent, 256),
+		done:     make(chan struct{}),
+		readDone: make(chan struct{}),
 	}
 	go backend.readLoop(stdout)
 	go backend.waitLoop()
@@ -385,6 +387,8 @@ func (b *appServerBackend) sendJSON(ctx context.Context, payload any) error {
 }
 
 func (b *appServerBackend) readLoop(stdout io.Reader) {
+	defer close(b.readDone)
+
 	reader := bufio.NewReader(stdout)
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -423,20 +427,20 @@ func (b *appServerBackend) handleIncomingLine(line []byte) error {
 
 	switch {
 	case env.Method != "" && len(env.ID) > 0:
-		b.events <- appServerEvent{
+		b.emitEvent(appServerEvent{
 			Request: &appServerRequest{
 				ID:     env.ID,
 				Method: env.Method,
 				Params: env.Params,
 			},
-		}
+		})
 	case env.Method != "":
-		b.events <- appServerEvent{
+		b.emitEvent(appServerEvent{
 			Notification: &appServerNotification{
 				Method: env.Method,
 				Params: env.Params,
 			},
-		}
+		})
 	case len(env.ID) > 0:
 		key := canonicalRequestID(env.ID)
 		b.pendingMu.Lock()
@@ -455,13 +459,23 @@ func (b *appServerBackend) handleIncomingLine(line []byte) error {
 	return nil
 }
 
+func (b *appServerBackend) emitEvent(event appServerEvent) {
+	select {
+	case <-b.done:
+		return
+	default:
+	}
+	b.events <- event
+}
+
 func (b *appServerBackend) waitLoop() {
 	err := b.cmd.Wait()
 	b.finalizeOnce.Do(func() {
 		b.waitErr = err
 		close(b.done)
-		close(b.events)
 		b.failPending(err)
+		<-b.readDone
+		close(b.events)
 	})
 }
 

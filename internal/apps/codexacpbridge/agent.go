@@ -127,7 +127,7 @@ func (a *codexACPProxyAgent) Initialize(_ context.Context, _ acp.InitializeReque
 	}, nil
 }
 
-func (a *codexACPProxyAgent) Cancel(_ context.Context, params acp.CancelNotification) error {
+func (a *codexACPProxyAgent) Cancel(ctx context.Context, params acp.CancelNotification) error {
 	a.mu.Lock()
 	state, ok := a.sessions[params.SessionId]
 	if !ok {
@@ -145,7 +145,7 @@ func (a *codexACPProxyAgent) Cancel(_ context.Context, params acp.CancelNotifica
 		cancel()
 	}
 	if backend != nil {
-		_ = backend.TurnInterrupt(context.Background(), threadID, turnID)
+		_ = backend.TurnInterrupt(ctx, threadID, turnID)
 	}
 	return nil
 }
@@ -1120,10 +1120,12 @@ func (a *codexACPProxyAgent) handleServerRequest(ctx context.Context, sessionID 
 
 	a.mu.Lock()
 	state := a.sessions[sessionID]
-	a.mu.Unlock()
 	if state == nil || state.backend == nil {
+		a.mu.Unlock()
 		return acp.NewInvalidParams("session backend unavailable")
 	}
+	backend := state.backend
+	a.mu.Unlock()
 	requestID := canonicalRequestID(req.ID)
 	if requestID != "" {
 		a.markPendingRequest(sessionID, requestID, req.Method)
@@ -1136,14 +1138,14 @@ func (a *codexACPProxyAgent) handleServerRequest(ctx context.Context, sessionID 
 		if err != nil {
 			return err
 		}
-		return state.backend.RespondRequest(ctx, req, map[string]any{"decision": decision})
+		return backend.RespondRequest(ctx, req, map[string]any{"decision": decision})
 	case "item/fileChange/requestApproval":
 		params, _ := decodeJSONMap(req.Params)
 		decision, err := a.requestDecision(ctx, sessionID, "File change approval", acp.ToolKindEdit, params, nil, []any{decisionAccept, decisionAcceptForSession, decisionDecline, decisionCancel})
 		if err != nil {
 			return err
 		}
-		return state.backend.RespondRequest(ctx, req, map[string]any{"decision": decision})
+		return backend.RespondRequest(ctx, req, map[string]any{"decision": decision})
 	case "item/permissions/requestApproval":
 		params, _ := decodeJSONMap(req.Params)
 		requestedPermissions := mapValue(params, "permissions")
@@ -1154,17 +1156,17 @@ func (a *codexACPProxyAgent) handleServerRequest(ctx context.Context, sessionID 
 		decisionName, _ := decision.(string)
 		switch decisionName {
 		case decisionAcceptForSession:
-			return state.backend.RespondRequest(ctx, req, map[string]any{
+			return backend.RespondRequest(ctx, req, map[string]any{
 				"permissions": requestedPermissions,
 				"scope":       "session",
 			})
 		case decisionAccept:
-			return state.backend.RespondRequest(ctx, req, map[string]any{
+			return backend.RespondRequest(ctx, req, map[string]any{
 				"permissions": requestedPermissions,
 				"scope":       "turn",
 			})
 		default:
-			return state.backend.RespondRequest(ctx, req, map[string]any{
+			return backend.RespondRequest(ctx, req, map[string]any{
 				"permissions": map[string]any{},
 				"scope":       "turn",
 			})
@@ -1188,7 +1190,7 @@ func (a *codexACPProxyAgent) handleServerRequest(ctx context.Context, sessionID 
 		case decisionCancel:
 			statusText = "cancelled by user"
 		}
-		return state.backend.RespondRequest(ctx, req, map[string]any{
+		return backend.RespondRequest(ctx, req, map[string]any{
 			"success": false,
 			"contentItems": []any{
 				map[string]any{
@@ -1225,7 +1227,7 @@ func (a *codexACPProxyAgent) handleServerRequest(ctx context.Context, sessionID 
 			}
 			answers[questionID] = map[string]any{"answers": answerValues}
 		}
-		return state.backend.RespondRequest(ctx, req, map[string]any{"answers": answers})
+		return backend.RespondRequest(ctx, req, map[string]any{"answers": answers})
 	case "mcpServer/elicitation/request":
 		params, _ := decodeJSONMap(req.Params)
 		decision, err := a.requestDecision(ctx, sessionID, "MCP elicitation request", acp.ToolKindOther, params, nil, []any{decisionAccept, decisionDecline, decisionCancel})
@@ -1251,14 +1253,14 @@ func (a *codexACPProxyAgent) handleServerRequest(ctx context.Context, sessionID 
 		if meta, ok := params["_meta"]; ok {
 			resp["_meta"] = meta
 		}
-		return state.backend.RespondRequest(ctx, req, resp)
+		return backend.RespondRequest(ctx, req, resp)
 	case "applyPatchApproval":
 		params, _ := decodeJSONMap(req.Params)
 		decision, err := a.requestDecision(ctx, sessionID, "Patch approval", acp.ToolKindEdit, params, nil, []any{decisionAccept, decisionAcceptForSession, decisionDecline, decisionCancel})
 		if err != nil {
 			return err
 		}
-		return state.backend.RespondRequest(ctx, req, map[string]any{
+		return backend.RespondRequest(ctx, req, map[string]any{
 			"decision": legacyApprovalDecision(decision),
 		})
 	case "execCommandApproval":
@@ -1267,7 +1269,7 @@ func (a *codexACPProxyAgent) handleServerRequest(ctx context.Context, sessionID 
 		if err != nil {
 			return err
 		}
-		return state.backend.RespondRequest(ctx, req, map[string]any{
+		return backend.RespondRequest(ctx, req, map[string]any{
 			"decision": legacyApprovalDecision(decision),
 		})
 	case "account/chatgptAuthTokens/refresh":
@@ -1278,11 +1280,11 @@ func (a *codexACPProxyAgent) handleServerRequest(ctx context.Context, sessionID 
 		}
 		decisionName, _ := decision.(string)
 		if decisionName == decisionCancel || decisionName == decisionDecline {
-			return state.backend.RespondRequestError(ctx, req, -32000, "chatgpt token refresh declined", nil)
+			return backend.RespondRequestError(ctx, req, -32000, "chatgpt token refresh declined", nil)
 		}
 		resp, ok := chatgptAuthTokensFromEnv()
 		if !ok {
-			return state.backend.RespondRequestError(
+			return backend.RespondRequestError(
 				ctx,
 				req,
 				-32001,
@@ -1290,9 +1292,9 @@ func (a *codexACPProxyAgent) handleServerRequest(ctx context.Context, sessionID 
 				nil,
 			)
 		}
-		return state.backend.RespondRequest(ctx, req, resp)
+		return backend.RespondRequest(ctx, req, resp)
 	default:
-		return a.respondWithFallback(ctx, state.backend, req)
+		return a.respondWithFallback(ctx, backend, req)
 	}
 }
 

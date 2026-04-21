@@ -56,11 +56,12 @@ func (c *captureWriteCloser) writesSnapshot() [][]byte {
 func newTestBackend(writer io.WriteCloser) *appServerBackend {
 	logger := testNopLogger()
 	return &appServerBackend{
-		stdin:   writer,
-		logger:  logger,
-		pending: make(map[string]chan appServerRPCResponse),
-		events:  make(chan appServerEvent, 16),
-		done:    make(chan struct{}),
+		stdin:    writer,
+		logger:   logger,
+		pending:  make(map[string]chan appServerRPCResponse),
+		events:   make(chan appServerEvent, 16),
+		done:     make(chan struct{}),
+		readDone: make(chan struct{}),
 	}
 }
 
@@ -371,6 +372,19 @@ func TestHandleIncomingLine(t *testing.T) {
 		backend := newTestBackend(&captureWriteCloser{})
 		if err := backend.handleIncomingLine([]byte(`{"id":1,"result":{"ok":true}}` + "\n")); err != nil {
 			t.Fatalf("handleIncomingLine() error = %v", err)
+		}
+	})
+
+	t.Run("drops request event after backend stop", func(t *testing.T) {
+		backend := newTestBackend(&captureWriteCloser{})
+		close(backend.done)
+		if err := backend.handleIncomingLine([]byte(`{"id":1,"method":"ask","params":{"k":"v"}}` + "\n")); err != nil {
+			t.Fatalf("handleIncomingLine() error = %v", err)
+		}
+		select {
+		case ev := <-backend.events:
+			t.Fatalf("unexpected event after backend stop: %#v", ev)
+		default:
 		}
 	})
 }

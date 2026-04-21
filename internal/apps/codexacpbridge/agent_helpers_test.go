@@ -15,6 +15,7 @@ type lifecycleBackendSpy struct {
 	interruptCalls int
 	lastThreadID   string
 	lastTurnID     string
+	lastCtx        context.Context
 	initializeResp appServerInitializeResponse
 }
 
@@ -38,10 +39,11 @@ func (s *lifecycleBackendSpy) ModelList(context.Context, map[string]any) (appSer
 	return appServerModelListResponse{}, nil
 }
 
-func (s *lifecycleBackendSpy) TurnInterrupt(_ context.Context, threadID string, turnID string) error {
+func (s *lifecycleBackendSpy) TurnInterrupt(ctx context.Context, threadID string, turnID string) error {
 	s.interruptCalls++
 	s.lastThreadID = threadID
 	s.lastTurnID = turnID
+	s.lastCtx = ctx
 	return nil
 }
 
@@ -119,7 +121,9 @@ func TestCancel(t *testing.T) {
 	}
 	agent.mu.Unlock()
 
-	if err := agent.Cancel(context.Background(), acp.CancelNotification{SessionId: sessionID}); err != nil {
+	type contextKey string
+	cancelCtx := context.WithValue(context.Background(), contextKey("cancel"), "token")
+	if err := agent.Cancel(cancelCtx, acp.CancelNotification{SessionId: sessionID}); err != nil {
 		t.Fatalf("Cancel(active) error = %v", err)
 	}
 
@@ -131,6 +135,9 @@ func TestCancel(t *testing.T) {
 	}
 	if backend.lastThreadID != "thread-x" || backend.lastTurnID != "turn-y" {
 		t.Fatalf("TurnInterrupt args = (%q,%q), want (%q,%q)", backend.lastThreadID, backend.lastTurnID, "thread-x", "turn-y")
+	}
+	if got := backend.lastCtx.Value(contextKey("cancel")); got != "token" {
+		t.Fatalf("TurnInterrupt ctx value = %#v, want %q", got, "token")
 	}
 }
 
