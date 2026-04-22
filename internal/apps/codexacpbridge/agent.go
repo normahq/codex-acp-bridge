@@ -24,6 +24,7 @@ const (
 	decisionApprovedSession  = "approved_for_session"
 	decisionDenied           = "denied"
 	decisionAbort            = "abort"
+	mcpContractMerge         = "merge"
 )
 
 type codexACPConnection interface {
@@ -55,6 +56,7 @@ type codexProxySessionState struct {
 	model      string
 	mode       string
 	mcpServers map[string]acp.McpServer
+	mcpStartup map[string]sessionMCPStartup
 
 	backend appServerSession
 	cancel  context.CancelFunc
@@ -63,6 +65,11 @@ type codexProxySessionState struct {
 	pendingRequests      map[string]string
 	lastThreadStatusText string
 	latestRateLimits     map[string]any
+}
+
+type sessionMCPStartup struct {
+	status string
+	err    string
 }
 
 func newCodexACPProxyAgent(
@@ -207,6 +214,13 @@ func (a *codexACPProxyAgent) NewSession(ctx context.Context, params acp.NewSessi
 	} else if modelState != nil {
 		resp.Models = modelState
 	}
+	if mcpMeta := a.sessionMCPMeta(sessionID, false); len(mcpMeta) > 0 {
+		resp.Meta = map[string]any{
+			"codex": map[string]any{
+				"mcp": mcpMeta,
+			},
+		}
+	}
 	return resp, nil
 }
 
@@ -304,6 +318,11 @@ func (a *codexACPProxyAgent) Prompt(ctx context.Context, params acp.PromptReques
 				}
 				if rateLimits := a.sessionRateLimits(params.SessionId); len(rateLimits) > 0 {
 					meta["rateLimits"] = rateLimits
+				}
+				if mcpMeta := a.sessionMCPMeta(params.SessionId, true); len(mcpMeta) > 0 {
+					meta["codex"] = map[string]any{
+						"mcp": mcpMeta,
+					}
 				}
 				if len(meta) > 0 {
 					resp.Meta = meta
@@ -847,6 +866,7 @@ func (a *codexACPProxyAgent) handleNotification(
 		name := stringValue(params, "name")
 		status := stringValue(params, "status")
 		errText := stringValue(params, "error")
+		a.setSessionMCPStartupStatus(sessionID, name, status, errText)
 		thought := fmt.Sprintf("MCP server %q status: %s.", name, status)
 		if name == "" {
 			thought = fmt.Sprintf("MCP server status: %s.", status)
@@ -1901,6 +1921,115 @@ func (a *codexACPProxyAgent) sessionRateLimits(sessionID acp.SessionId) map[stri
 		return cloneAnyMap(state.latestRateLimits)
 	}
 	return nil
+}
+
+func (a *codexACPProxyAgent) setSessionMCPStartupStatus(sessionID acp.SessionId, name string, status string, errText string) {
+	trimmedName := strings.TrimSpace(name)
+	if trimmedName == "" {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	state := a.sessions[sessionID]
+	if state == nil || len(state.mcpServers) == 0 {
+		return
+	}
+	if _, ok := state.mcpServers[trimmedName]; !ok {
+		return
+	}
+	if state.mcpStartup == nil {
+		state.mcpStartup = make(map[string]sessionMCPStartup, len(state.mcpServers))
+	}
+	state.mcpStartup[trimmedName] = sessionMCPStartup{
+		status: strings.TrimSpace(status),
+		err:    strings.TrimSpace(errText),
+	}
+}
+
+func (a *codexACPProxyAgent) sessionMCPMeta(sessionID acp.SessionId, includeStartup bool) map[string]any {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	state := a.sessions[sessionID]
+	if state == nil || len(state.mcpServers) == 0 {
+		return nil
+	}
+	meta := map[string]any{
+		"contract":  mcpContractMerge,
+		"requested": requestedMCPServersMeta(state.mcpServers),
+	}
+	if includeStartup {
+		if startup := mcpStartupStatusMeta(state.mcpServers, state.mcpStartup); len(startup) > 0 {
+			meta["startupStatus"] = startup
+		}
+	}
+	return meta
+}
+
+func requestedMCPServersMeta(servers map[string]acp.McpServer) []any {
+	if len(servers) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(servers))
+	for name := range servers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]any, 0, len(names))
+	for _, name := range names {
+		transport := mcpTransportName(servers[name])
+		entry := map[string]any{"name": name}
+		if transport != "" {
+			entry["transport"] = transport
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func mcpStartupStatusMeta(servers map[string]acp.McpServer, startup map[string]sessionMCPStartup) map[string]any {
+	if len(servers) == 0 || len(startup) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(servers))
+	for name := range servers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make(map[string]any)
+	for _, name := range names {
+		status, ok := startup[name]
+		if !ok {
+			continue
+		}
+		entry := map[string]any{}
+		if status.status != "" {
+			entry["status"] = status.status
+		}
+		if status.err != "" {
+			entry["error"] = status.err
+		}
+		if len(entry) == 0 {
+			continue
+		}
+		out[name] = entry
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func mcpTransportName(server acp.McpServer) string {
+	switch {
+	case server.Stdio != nil:
+		return "stdio"
+	case server.Http != nil:
+		return "http"
+	case server.Sse != nil:
+		return "sse"
+	default:
+		return ""
+	}
 }
 
 func cloneAnyMap(m map[string]any) map[string]any {

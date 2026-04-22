@@ -17,6 +17,7 @@ const testModelGPT54 = "gpt-5.4"
 const (
 	testApprovalOnRequest      = "on-request"
 	testApprovalsReviewerGuard = "guardian_subagent"
+	testMCPTransportStdio      = "stdio"
 	testPersonalityPragmatic   = "pragmatic"
 	testServiceTierFlex        = "flex"
 )
@@ -156,6 +157,29 @@ func TestNewSessionAppliesCodexMetaOverridesToThreadStart(t *testing.T) {
 	}
 	if got, want := string(resp.SessionId), "session-meta-1"; got != want {
 		t.Fatalf("NewSession().SessionId = %q, want %q", got, want)
+	}
+	meta, ok := resp.Meta.(map[string]any)
+	if !ok {
+		t.Fatalf("NewSession().Meta type = %T, want map[string]any", resp.Meta)
+	}
+	codexMeta := mapValue(meta, "codex")
+	mcpMeta := mapValue(codexMeta, "mcp")
+	if got := stringValue(mcpMeta, "contract"); got != mcpContractMerge {
+		t.Fatalf("NewSession()._meta.codex.mcp.contract = %q, want %q", got, mcpContractMerge)
+	}
+	requested := listValue(mcpMeta, "requested")
+	if len(requested) != 1 {
+		t.Fatalf("NewSession()._meta.codex.mcp.requested len = %d, want 1", len(requested))
+	}
+	requestedServer, ok := requested[0].(map[string]any)
+	if !ok {
+		t.Fatalf("NewSession()._meta.codex.mcp.requested[0] type = %T, want map[string]any", requested[0])
+	}
+	if got := stringValue(requestedServer, "name"); got != "docs" {
+		t.Fatalf("NewSession()._meta.codex.mcp.requested[0].name = %q, want %q", got, "docs")
+	}
+	if got := stringValue(requestedServer, "transport"); got != testMCPTransportStdio {
+		t.Fatalf("NewSession()._meta.codex.mcp.requested[0].transport = %q, want %q", got, testMCPTransportStdio)
 	}
 
 	threadStartParams := session.threadStartParamsSnapshot()
@@ -924,7 +948,7 @@ func TestPromptMapsExtendedNotifications(t *testing.T) {
 	})
 	queueNotification(session, "mcpServer/startupStatus/updated", map[string]any{
 		"name":   "docs",
-		"status": "failed",
+		"status": statusFailed,
 		"error":  "spawn failed",
 	})
 	queueNotification(session, "mcpServer/oauthLogin/completed", map[string]any{
@@ -1238,6 +1262,91 @@ func TestPromptStopsOnErrorNotificationWithoutRetry(t *testing.T) {
 	updates := conn.sessionUpdates(newResp.SessionId)
 	if !containsThoughtSubstring(updates, "fatal boom") {
 		t.Fatalf("missing error thought update: %#v", updates)
+	}
+}
+
+func TestPromptMetaIncludesRequestedMCPStartupStatusOnly(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	queueNotification(session, "mcpServer/startupStatus/updated", map[string]any{
+		"name":   "docs",
+		"status": statusFailed,
+		"error":  "spawn failed",
+	})
+	queueNotification(session, "mcpServer/startupStatus/updated", map[string]any{
+		"name":   "global-only",
+		"status": "completed",
+	})
+	queueNotification(session, "turn/completed", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "completed",
+		},
+	})
+
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{
+		Cwd: "/tmp/work",
+		McpServers: []acp.McpServer{
+			{
+				Stdio: &acp.McpServerStdio{
+					Name:    "docs",
+					Command: "docs-server",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	promptResp, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	})
+	if err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+
+	meta, ok := promptResp.Meta.(map[string]any)
+	if !ok {
+		t.Fatalf("PromptResponse.Meta type = %T, want map[string]any", promptResp.Meta)
+	}
+	codexMeta := mapValue(meta, "codex")
+	mcpMeta := mapValue(codexMeta, "mcp")
+	if got := stringValue(mcpMeta, "contract"); got != mcpContractMerge {
+		t.Fatalf("PromptResponse.Meta.codex.mcp.contract = %q, want %q", got, mcpContractMerge)
+	}
+	requested := listValue(mcpMeta, "requested")
+	if len(requested) != 1 {
+		t.Fatalf("PromptResponse.Meta.codex.mcp.requested len = %d, want 1", len(requested))
+	}
+	requestedServer, ok := requested[0].(map[string]any)
+	if !ok {
+		t.Fatalf("PromptResponse.Meta.codex.mcp.requested[0] type = %T, want map[string]any", requested[0])
+	}
+	if got := stringValue(requestedServer, "name"); got != "docs" {
+		t.Fatalf("PromptResponse.Meta.codex.mcp.requested[0].name = %q, want %q", got, "docs")
+	}
+	if got := stringValue(requestedServer, "transport"); got != testMCPTransportStdio {
+		t.Fatalf("PromptResponse.Meta.codex.mcp.requested[0].transport = %q, want %q", got, testMCPTransportStdio)
+	}
+	startupStatus := mapValue(mcpMeta, "startupStatus")
+	docsStatus := mapValue(startupStatus, "docs")
+	if got := stringValue(docsStatus, "status"); got != statusFailed {
+		t.Fatalf("PromptResponse.Meta.codex.mcp.startupStatus.docs.status = %q, want %q", got, statusFailed)
+	}
+	if got := stringValue(docsStatus, "error"); got != "spawn failed" {
+		t.Fatalf("PromptResponse.Meta.codex.mcp.startupStatus.docs.error = %q, want %q", got, "spawn failed")
+	}
+	if _, ok := startupStatus["global-only"]; ok {
+		t.Fatalf("PromptResponse.Meta.codex.mcp.startupStatus unexpectedly contains non-requested server: %#v", startupStatus)
 	}
 }
 
