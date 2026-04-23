@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	acp "github.com/coder/acp-go-sdk"
 	"github.com/rs/zerolog"
@@ -579,7 +580,7 @@ func TestHandleNotificationCommandExecOutputDeltaUsesSummaryThought(t *testing.T
 	if err != nil {
 		t.Fatalf("marshal params: %v", err)
 	}
-	done, stopReason, usage, err := agent.handleNotification(context.Background(), sessionID, "thr-1", "turn-1", &appServerNotification{
+	done, stopReason, usage, err := agent.handleNotification(context.Background(), sessionID, "thr-1", "turn-1", true, &appServerNotification{
 		Method: "command/exec/outputDelta",
 		Params: raw,
 	})
@@ -1350,6 +1351,180 @@ func TestPromptMetaIncludesRequestedMCPStartupStatusOnly(t *testing.T) {
 	}
 }
 
+func TestPromptForwardsSessionScopedUpdatesAfterCompletion(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	queueNotification(session, "turn/completed", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "completed",
+		},
+	})
+
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	}); err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+
+	queueNotification(session, "account/updated", map[string]any{})
+	waitForCondition(t, time.Second, func() bool {
+		updates := conn.sessionUpdates(newResp.SessionId)
+		return containsThoughtSubstring(updates, "Account updated.")
+	}, "missing account update thought after prompt completion")
+}
+
+func TestPromptRebindsTurnIDFromTurnStartedNotification(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+
+	type promptResult struct {
+		resp acp.PromptResponse
+		err  error
+	}
+	resultCh := make(chan promptResult, 1)
+	go func() {
+		resp, promptErr := agent.Prompt(context.Background(), acp.PromptRequest{
+			SessionId: newResp.SessionId,
+			Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+		})
+		resultCh <- promptResult{resp: resp, err: promptErr}
+	}()
+
+	waitForCondition(t, time.Second, func() bool {
+		return len(session.turnStartParamsSnapshot()) == 1
+	}, "turn/start not observed before queuing turn events")
+	queueNotification(session, "turn/started", map[string]any{
+		"threadId": "thr-1",
+		"turn": map[string]any{
+			"id":     "turn-2",
+			"status": "inProgress",
+		},
+	})
+	queueNotification(session, "item/agentMessage/delta", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-2",
+		"itemId":   "item-msg-1",
+		"delta":    "rebound",
+	})
+	queueNotification(session, "turn/completed", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-2",
+		"turn": map[string]any{
+			"id":     "turn-2",
+			"status": "completed",
+		},
+	})
+
+	select {
+	case res := <-resultCh:
+		if res.err != nil {
+			t.Fatalf("Prompt() error = %v", res.err)
+		}
+		if res.resp.StopReason != acp.StopReasonEndTurn {
+			t.Fatalf("Prompt().StopReason = %q, want %q", res.resp.StopReason, acp.StopReasonEndTurn)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for prompt completion after turn-id rebind")
+	}
+
+	updates := conn.sessionUpdates(newResp.SessionId)
+	if !containsAgentMessageText(updates, "rebound") {
+		t.Fatalf("missing rebound delta after turn-id rebind: %#v", updates)
+	}
+}
+
+func TestPromptRebindsThreadIDFromThreadStartedNotification(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+
+	type promptResult struct {
+		resp acp.PromptResponse
+		err  error
+	}
+	resultCh := make(chan promptResult, 1)
+	go func() {
+		resp, promptErr := agent.Prompt(context.Background(), acp.PromptRequest{
+			SessionId: newResp.SessionId,
+			Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+		})
+		resultCh <- promptResult{resp: resp, err: promptErr}
+	}()
+
+	waitForCondition(t, time.Second, func() bool {
+		return len(session.turnStartParamsSnapshot()) == 1
+	}, "turn/start not observed before queuing thread-rebind events")
+	queueNotification(session, "thread/started", map[string]any{
+		"thread": map[string]any{
+			"id": "thr-2",
+		},
+	})
+	queueNotification(session, "thread/status/changed", map[string]any{
+		"threadId": "thr-2",
+		"status": map[string]any{
+			"type": "active",
+		},
+	})
+	queueNotification(session, "turn/completed", map[string]any{
+		"threadId": "thr-2",
+		"turnId":   "turn-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "completed",
+		},
+	})
+
+	select {
+	case res := <-resultCh:
+		if res.err != nil {
+			t.Fatalf("Prompt() error = %v", res.err)
+		}
+		if res.resp.StopReason != acp.StopReasonEndTurn {
+			t.Fatalf("Prompt().StopReason = %q, want %q", res.resp.StopReason, acp.StopReasonEndTurn)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for prompt completion after thread-id rebind")
+	}
+
+	updates := conn.sessionUpdates(newResp.SessionId)
+	if !containsThoughtSubstring(updates, "Thread status: active") {
+		t.Fatalf("missing thread status update after thread-id rebind: %#v", updates)
+	}
+}
+
 func TestPromptBridgesToolCallRequestAsPartialForward(t *testing.T) {
 	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
 	queueRequest(session, "item/tool/call", json.RawMessage("3"), map[string]any{
@@ -1775,7 +1950,7 @@ func TestServerRequestResolvedClearsPendingRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal params: %v", err)
 	}
-	done, stopReason, usage, err := agent.handleNotification(context.Background(), sessionID, "thr-1", "turn-1", &appServerNotification{
+	done, stopReason, usage, err := agent.handleNotification(context.Background(), sessionID, "thr-1", "turn-1", true, &appServerNotification{
 		Method: "serverRequest/resolved",
 		Params: raw,
 	})
@@ -1999,6 +2174,18 @@ func queueRequest(session *fakeAppServerSession, method string, id json.RawMessa
 			Params: raw,
 		},
 	}
+}
+
+func waitForCondition(t *testing.T, timeout time.Duration, cond func() bool, failureMessage string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal(failureMessage)
 }
 
 func containsAgentMessageText(updates []acp.SessionNotification, text string) bool {

@@ -25,6 +25,7 @@ const (
 	decisionDenied           = "denied"
 	decisionAbort            = "abort"
 	mcpContractMerge         = "merge"
+	methodTurnStarted        = "turn/started"
 )
 
 type codexACPConnection interface {
@@ -48,6 +49,12 @@ type codexACPProxyAgent struct {
 	nextSessionID uint64
 }
 
+type promptCompletion struct {
+	stopReason acp.StopReason
+	usage      map[string]any
+	err        error
+}
+
 type codexProxySessionState struct {
 	cwd        string
 	config     codexAppConfig
@@ -60,11 +67,15 @@ type codexProxySessionState struct {
 
 	backend appServerSession
 	cancel  context.CancelFunc
+	done    chan promptCompletion
+
+	workerCancel context.CancelFunc
 
 	planDeltaByItem      map[string]string
 	pendingRequests      map[string]string
 	lastThreadStatusText string
 	latestRateLimits     map[string]any
+	latestUsage          map[string]any
 }
 
 type sessionMCPStartup struct {
@@ -145,7 +156,6 @@ func (a *codexACPProxyAgent) Cancel(ctx context.Context, params acp.CancelNotifi
 	backend := state.backend
 	threadID := state.threadID
 	turnID := state.turnID
-	state.cancel = nil
 	a.mu.Unlock()
 
 	if cancel != nil {
@@ -194,13 +204,24 @@ func (a *codexACPProxyAgent) NewSession(ctx context.Context, params acp.NewSessi
 		return acp.NewSessionResponse{}, err
 	}
 	if err := a.ensureSessionThread(ctx, sessionID); err != nil {
+		var (
+			backend      appServerSession
+			workerCancel context.CancelFunc
+		)
 		a.mu.Lock()
-		if state := a.sessions[sessionID]; state != nil && state.backend != nil {
-			_ = state.backend.Close()
-			_ = state.backend.Wait()
+		if state := a.sessions[sessionID]; state != nil {
+			backend = state.backend
+			workerCancel = state.workerCancel
 		}
 		delete(a.sessions, sessionID)
 		a.mu.Unlock()
+		if workerCancel != nil {
+			workerCancel()
+		}
+		if backend != nil {
+			_ = backend.Close()
+			_ = backend.Wait()
+		}
 		return acp.NewSessionResponse{}, err
 	}
 
@@ -238,7 +259,7 @@ func (a *codexACPProxyAgent) Prompt(ctx context.Context, params acp.PromptReques
 		a.mu.Unlock()
 		return acp.PromptResponse{}, acp.NewInvalidParams("session not found")
 	}
-	if state.cancel != nil {
+	if state.done != nil {
 		a.mu.Unlock()
 		return acp.PromptResponse{}, acp.NewInvalidRequest("prompt already active for session")
 	}
@@ -248,9 +269,16 @@ func (a *codexACPProxyAgent) Prompt(ctx context.Context, params acp.PromptReques
 	}
 	promptCtx, cancel := context.WithCancel(ctx)
 	state.cancel = cancel
+	state.done = make(chan promptCompletion, 1)
 	backend := state.backend
 	threadID := state.threadID
 	model := state.model
+	doneCh := state.done
+	var workerCtx context.Context
+	if state.workerCancel == nil {
+		workerCtx, state.workerCancel = context.WithCancel(context.Background())
+	}
+	startWorker := workerCtx != nil
 	a.mu.Unlock()
 
 	turnStartParams, err := buildTurnStartParams(threadID, params.Prompt, model)
@@ -261,15 +289,26 @@ func (a *codexACPProxyAgent) Prompt(ctx context.Context, params acp.PromptReques
 	defer func() {
 		a.mu.Lock()
 		if current := a.sessions[params.SessionId]; current != nil {
-			current.cancel = nil
-			current.turnID = ""
-			current.pendingRequests = nil
+			if current.done == doneCh {
+				current.cancel = nil
+				current.done = nil
+				current.turnID = ""
+				current.pendingRequests = nil
+			}
 		}
 		a.mu.Unlock()
 	}()
 
 	turnStart, err := backend.TurnStart(promptCtx, turnStartParams)
 	if err != nil {
+		if startWorker {
+			a.mu.Lock()
+			if current := a.sessions[params.SessionId]; current != nil && current.workerCancel != nil {
+				current.workerCancel()
+				current.workerCancel = nil
+			}
+			a.mu.Unlock()
+		}
 		return acp.PromptResponse{}, fmt.Errorf("turn/start: %w", err)
 	}
 	turnID := strings.TrimSpace(turnStart.Turn.ID)
@@ -279,10 +318,13 @@ func (a *codexACPProxyAgent) Prompt(ctx context.Context, params acp.PromptReques
 		current.planDeltaByItem = make(map[string]string)
 		current.pendingRequests = make(map[string]string)
 		current.lastThreadStatusText = ""
+		current.latestUsage = nil
 	}
 	a.mu.Unlock()
+	if startWorker {
+		go a.runSessionEventLoop(workerCtx, params.SessionId, backend)
+	}
 
-	var usage map[string]any
 	for {
 		select {
 		case <-promptCtx.Done():
@@ -290,45 +332,31 @@ func (a *codexACPProxyAgent) Prompt(ctx context.Context, params acp.PromptReques
 				return acp.PromptResponse{StopReason: acp.StopReasonCancelled}, nil
 			}
 			return acp.PromptResponse{}, promptCtx.Err()
-		case event, ok := <-backend.Events():
-			if !ok {
-				return acp.PromptResponse{}, errors.New("bridge backend event stream closed")
+		case completion := <-doneCh:
+			if completion.err != nil {
+				return acp.PromptResponse{}, completion.err
 			}
-			if event.Request != nil {
-				if err := a.handleServerRequest(promptCtx, params.SessionId, event.Request); err != nil {
-					return acp.PromptResponse{}, err
+			resp := acp.PromptResponse{StopReason: completion.stopReason}
+			meta := map[string]any{}
+			usage := completion.usage
+			if usage == nil {
+				usage = a.sessionUsage(params.SessionId)
+			}
+			if usage != nil {
+				meta["usage"] = usage
+			}
+			if rateLimits := a.sessionRateLimits(params.SessionId); len(rateLimits) > 0 {
+				meta["rateLimits"] = rateLimits
+			}
+			if mcpMeta := a.sessionMCPMeta(params.SessionId, true); len(mcpMeta) > 0 {
+				meta["codex"] = map[string]any{
+					"mcp": mcpMeta,
 				}
-				continue
 			}
-			if event.Notification == nil {
-				continue
+			if len(meta) > 0 {
+				resp.Meta = meta
 			}
-			done, stopReason, usageUpdate, err := a.handleNotification(promptCtx, params.SessionId, threadID, turnID, event.Notification)
-			if err != nil {
-				return acp.PromptResponse{}, err
-			}
-			if usageUpdate != nil {
-				usage = usageUpdate
-			}
-			if done {
-				resp := acp.PromptResponse{StopReason: stopReason}
-				meta := map[string]any{}
-				if usage != nil {
-					meta["usage"] = usage
-				}
-				if rateLimits := a.sessionRateLimits(params.SessionId); len(rateLimits) > 0 {
-					meta["rateLimits"] = rateLimits
-				}
-				if mcpMeta := a.sessionMCPMeta(params.SessionId, true); len(mcpMeta) > 0 {
-					meta["codex"] = map[string]any{
-						"mcp": mcpMeta,
-					}
-				}
-				if len(meta) > 0 {
-					resp.Meta = meta
-				}
-				return resp, nil
-			}
+			return resp, nil
 		}
 	}
 }
@@ -341,7 +369,7 @@ func (a *codexACPProxyAgent) SetSessionMode(_ context.Context, params acp.SetSes
 	if !ok {
 		return acp.SetSessionModeResponse{}, acp.NewInvalidParams("session not found")
 	}
-	if state.cancel != nil {
+	if state.done != nil {
 		return acp.SetSessionModeResponse{}, acp.NewInvalidRequest("cannot update session mode while prompt is active")
 	}
 	state.mode = nextMode
@@ -356,7 +384,7 @@ func (a *codexACPProxyAgent) SetSessionModel(_ context.Context, params acp.SetSe
 	if !ok {
 		return acp.SetSessionModelResponse{}, acp.NewInvalidParams("session not found")
 	}
-	if state.cancel != nil {
+	if state.done != nil {
 		return acp.SetSessionModelResponse{}, acp.NewInvalidRequest("cannot update session model while prompt is active")
 	}
 	state.model = nextModel
@@ -383,19 +411,21 @@ func (a *codexACPProxyAgent) ensureSessionBackend(ctx context.Context, sessionID
 	}
 
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	state, ok = a.sessions[sessionID]
 	if !ok {
+		a.mu.Unlock()
 		_ = backend.Close()
 		_ = backend.Wait()
 		return acp.NewInvalidParams("session not found")
 	}
 	if state.backend != nil {
+		a.mu.Unlock()
 		_ = backend.Close()
 		_ = backend.Wait()
 		return nil
 	}
 	state.backend = backend
+	a.mu.Unlock()
 	return nil
 }
 
@@ -539,21 +569,91 @@ func listAppServerModels(ctx context.Context, backend appServerSession) ([]appSe
 	}
 }
 
+func (a *codexACPProxyAgent) runSessionEventLoop(ctx context.Context, sessionID acp.SessionId, backend appServerSession) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event, ok := <-backend.Events():
+			if !ok {
+				a.clearSessionBackend(sessionID, backend)
+				a.completePrompt(sessionID, promptCompletion{err: errors.New("bridge backend event stream closed")})
+				return
+			}
+			if event.Request != nil {
+				if err := a.handleServerRequest(ctx, sessionID, event.Request); err != nil {
+					a.completePrompt(sessionID, promptCompletion{err: err})
+				}
+				continue
+			}
+			if event.Notification == nil {
+				continue
+			}
+
+			threadID, turnID, hasActivePrompt := a.currentSessionCorrelation(sessionID)
+			done, stopReason, usage, err := a.handleNotification(ctx, sessionID, threadID, turnID, hasActivePrompt, event.Notification)
+			if err != nil {
+				a.completePrompt(sessionID, promptCompletion{err: err})
+				continue
+			}
+			if usage != nil {
+				a.setSessionUsage(sessionID, usage)
+			}
+			if done {
+				a.completePrompt(sessionID, promptCompletion{
+					stopReason: stopReason,
+					usage:      usage,
+				})
+			}
+		}
+	}
+}
+
+func (a *codexACPProxyAgent) currentSessionCorrelation(sessionID acp.SessionId) (threadID string, turnID string, hasActivePrompt bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	state := a.sessions[sessionID]
+	if state == nil {
+		return "", "", false
+	}
+	return state.threadID, state.turnID, state.done != nil
+}
+
+func (a *codexACPProxyAgent) completePrompt(sessionID acp.SessionId, completion promptCompletion) {
+	a.mu.Lock()
+	state := a.sessions[sessionID]
+	if state == nil || state.done == nil {
+		a.mu.Unlock()
+		return
+	}
+	doneCh := state.done
+	state.turnID = ""
+	state.pendingRequests = nil
+	a.mu.Unlock()
+
+	select {
+	case doneCh <- completion:
+	default:
+	}
+}
+
 func (a *codexACPProxyAgent) closeAllSessionBackends() {
 	type backendEntry struct {
-		backend appServerSession
-		cancel  context.CancelFunc
+		backend      appServerSession
+		cancel       context.CancelFunc
+		workerCancel context.CancelFunc
 	}
-	entries := make([]backendEntry, 0)
-
 	a.mu.Lock()
+	entries := make([]backendEntry, 0, len(a.sessions))
 	for _, state := range a.sessions {
-		if state.cancel != nil {
-			entries = append(entries, backendEntry{backend: state.backend, cancel: state.cancel})
-			state.cancel = nil
-		} else {
-			entries = append(entries, backendEntry{backend: state.backend, cancel: nil})
-		}
+		entries = append(entries, backendEntry{
+			backend:      state.backend,
+			cancel:       state.cancel,
+			workerCancel: state.workerCancel,
+		})
+		state.cancel = nil
+		state.done = nil
+		state.workerCancel = nil
 		state.backend = nil
 		state.threadID = ""
 		state.turnID = ""
@@ -563,6 +663,9 @@ func (a *codexACPProxyAgent) closeAllSessionBackends() {
 	for _, entry := range entries {
 		if entry.cancel != nil {
 			entry.cancel()
+		}
+		if entry.workerCancel != nil {
+			entry.workerCancel()
 		}
 		if entry.backend != nil {
 			_ = entry.backend.Close()
@@ -576,6 +679,7 @@ func (a *codexACPProxyAgent) handleNotification(
 	sessionID acp.SessionId,
 	threadID string,
 	turnID string,
+	hasActivePrompt bool,
 	note *appServerNotification,
 ) (done bool, stopReason acp.StopReason, usage map[string]any, err error) {
 	params, err := decodeJSONMap(note.Params)
@@ -585,7 +689,15 @@ func (a *codexACPProxyAgent) handleNotification(
 	if !matchesThreadID(params, threadID) {
 		return false, "", nil, nil
 	}
-	if !matchesTurnID(params, turnID) {
+	if requiresActiveTurn(note.Method) {
+		if !hasActivePrompt || strings.TrimSpace(turnID) == "" {
+			return false, "", nil, nil
+		}
+		if note.Method != methodTurnStarted && !matchesTurnID(params, turnID) {
+			return false, "", nil, nil
+		}
+	}
+	if note.Method == methodTurnStarted && !hasActivePrompt {
 		return false, "", nil, nil
 	}
 
@@ -623,12 +735,13 @@ func (a *codexACPProxyAgent) handleNotification(
 		if err := a.sendThoughtUpdate(ctx, sessionID, "Thread status: "+summary); err != nil {
 			return false, "", nil, err
 		}
-	case "turn/started":
+	case methodTurnStarted:
 		turn := mapValue(params, "turn")
 		startedTurnID := stringValue(turn, "id")
-		if startedTurnID == "" || startedTurnID == strings.TrimSpace(turnID) {
-			a.resetTurnState(sessionID)
+		if startedTurnID != "" {
+			a.syncTurnID(sessionID, startedTurnID)
 		}
+		a.resetTurnState(sessionID)
 	case "item/agentMessage/delta":
 		delta := rawStringValue(params, "delta")
 		if delta == "" {
@@ -1660,6 +1773,49 @@ func matchesTurnID(params map[string]any, turnID string) bool {
 	return true
 }
 
+func requiresActiveTurn(method string) bool {
+	switch strings.TrimSpace(method) {
+	case "error":
+		return true
+	case methodTurnStarted:
+		return true
+	case "item/agentMessage/delta":
+		return true
+	case "item/reasoning/textDelta", "item/reasoning/summaryTextDelta":
+		return true
+	case "item/reasoning/summaryPartAdded":
+		return true
+	case "item/plan/delta":
+		return true
+	case "turn/plan/updated":
+		return true
+	case "turn/diff/updated":
+		return true
+	case "item/started":
+		return true
+	case "item/completed":
+		return true
+	case "item/commandExecution/outputDelta", "item/fileChange/outputDelta":
+		return true
+	case "item/commandExecution/terminalInteraction":
+		return true
+	case "item/autoApprovalReview/started", "item/autoApprovalReview/completed":
+		return true
+	case "hook/started", "hook/completed":
+		return true
+	case "item/mcpToolCall/progress":
+		return true
+	case "model/rerouted":
+		return true
+	case "thread/tokenUsage/updated":
+		return true
+	case "turn/completed":
+		return true
+	default:
+		return false
+	}
+}
+
 func planEntriesFromNotification(params map[string]any) []acp.PlanEntry {
 	planSteps := listValue(params, "plan")
 	if len(planSteps) == 0 {
@@ -1875,6 +2031,7 @@ func (a *codexACPProxyAgent) resetTurnState(sessionID acp.SessionId) {
 		state.planDeltaByItem = make(map[string]string)
 		state.pendingRequests = make(map[string]string)
 		state.lastThreadStatusText = ""
+		state.latestUsage = nil
 	}
 }
 
@@ -1919,6 +2076,23 @@ func (a *codexACPProxyAgent) sessionRateLimits(sessionID acp.SessionId) map[stri
 	defer a.mu.Unlock()
 	if state := a.sessions[sessionID]; state != nil {
 		return cloneAnyMap(state.latestRateLimits)
+	}
+	return nil
+}
+
+func (a *codexACPProxyAgent) setSessionUsage(sessionID acp.SessionId, usage map[string]any) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if state := a.sessions[sessionID]; state != nil {
+		state.latestUsage = cloneAnyMap(usage)
+	}
+}
+
+func (a *codexACPProxyAgent) sessionUsage(sessionID acp.SessionId) map[string]any {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if state := a.sessions[sessionID]; state != nil {
+		return cloneAnyMap(state.latestUsage)
 	}
 	return nil
 }
@@ -2043,6 +2217,19 @@ func cloneAnyMap(m map[string]any) map[string]any {
 	return out
 }
 
+func (a *codexACPProxyAgent) clearSessionBackend(sessionID acp.SessionId, backend appServerSession) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	state := a.sessions[sessionID]
+	if state == nil || state.backend != backend {
+		return
+	}
+	state.backend = nil
+	state.workerCancel = nil
+	state.threadID = ""
+	state.turnID = ""
+}
+
 func (a *codexACPProxyAgent) syncThreadID(sessionID acp.SessionId, nextThreadID string) {
 	trimmed := strings.TrimSpace(nextThreadID)
 	if trimmed == "" {
@@ -2052,6 +2239,18 @@ func (a *codexACPProxyAgent) syncThreadID(sessionID acp.SessionId, nextThreadID 
 	defer a.mu.Unlock()
 	if state := a.sessions[sessionID]; state != nil {
 		state.threadID = trimmed
+	}
+}
+
+func (a *codexACPProxyAgent) syncTurnID(sessionID acp.SessionId, nextTurnID string) {
+	trimmed := strings.TrimSpace(nextTurnID)
+	if trimmed == "" {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if state := a.sessions[sessionID]; state != nil {
+		state.turnID = trimmed
 	}
 }
 
