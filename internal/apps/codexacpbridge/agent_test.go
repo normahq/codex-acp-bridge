@@ -556,7 +556,7 @@ func TestNewSessionContinuesWhenModelListFails(t *testing.T) {
 	}
 }
 
-func TestHandleNotificationCommandExecOutputDeltaUsesSummaryThought(t *testing.T) {
+func TestHandleNotificationCommandExecOutputDeltaDoesNotEmitThought(t *testing.T) {
 	sessionID := acp.SessionId("s1")
 	conn := &fakeACPAppConnection{}
 	l := zerolog.Nop()
@@ -598,11 +598,11 @@ func TestHandleNotificationCommandExecOutputDeltaUsesSummaryThought(t *testing.T
 	}
 
 	updates := conn.sessionUpdates(sessionID)
-	if !containsThoughtSubstring(updates, "command/exec output: process=proc-1 stream=stdout bytes(base64)=8 capReached=false.") {
-		t.Fatalf("missing command/exec summary thought: %#v", updates)
-	}
 	if containsThoughtSubstring(updates, "QUJDRA==") {
 		t.Fatalf("unexpected raw delta payload in thought update: %#v", updates)
+	}
+	if countThoughtChunks(updates) != 0 {
+		t.Fatalf("unexpected thought updates for command/exec output delta: %#v", updates)
 	}
 }
 
@@ -752,6 +752,75 @@ func TestPromptStreamsAppServerNotificationsToACPUpdates(t *testing.T) {
 	}
 	if !containsToolCall(updates, "codex-item-item-cmd-1") {
 		t.Fatalf("missing tool call start/update in ACP updates: %#v", updates)
+	}
+}
+
+func TestPromptDoesNotProjectNonToolItemLifecycleAsToolCalls(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	for _, itemType := range []string{"reasoning", "plan", "agentMessage"} {
+		itemID := "item-" + itemType + "-1"
+		queueNotification(session, "item/started", map[string]any{
+			"threadId": "thr-1",
+			"turnId":   "turn-1",
+			"item": map[string]any{
+				"type":   itemType,
+				"id":     itemID,
+				"status": "inProgress",
+			},
+		})
+		queueNotification(session, "item/completed", map[string]any{
+			"threadId": "thr-1",
+			"turnId":   "turn-1",
+			"item": map[string]any{
+				"type":   itemType,
+				"id":     itemID,
+				"status": "completed",
+			},
+		})
+	}
+	queueNotification(session, "item/reasoning/textDelta", map[string]any{
+		"threadId":     "thr-1",
+		"turnId":       "turn-1",
+		"itemId":       "item-reasoning-1",
+		"contentIndex": 0,
+		"delta":        "thinking",
+	})
+	queueNotification(session, "turn/completed", map[string]any{
+		"threadId": "thr-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "completed",
+		},
+	})
+
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	promptResp, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	})
+	if err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+	if promptResp.StopReason != acp.StopReasonEndTurn {
+		t.Fatalf("StopReason = %q, want %q", promptResp.StopReason, acp.StopReasonEndTurn)
+	}
+
+	updates := conn.sessionUpdates(newResp.SessionId)
+	if countToolCallEvents(updates) != 0 {
+		t.Fatalf("unexpected tool call lifecycle updates for non-tool items: %#v", updates)
+	}
+	if countThoughtText(updates, "thinking") != 1 {
+		t.Fatalf("missing reasoning text delta thought update: %#v", updates)
 	}
 }
 
@@ -911,6 +980,20 @@ func TestPromptMapsExtendedNotifications(t *testing.T) {
 		"processId": "p-1",
 		"stdin":     "y\n",
 	})
+	queueNotification(session, "item/fileChange/patchUpdated", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"itemId":   "item-file-1",
+		"changes": []any{
+			map[string]any{
+				"path": "README.md",
+				"kind": map[string]any{
+					"type": "update",
+				},
+				"diff": "@@ -1 +1 @@\n-old\n+new",
+			},
+		},
+	})
 	queueNotification(session, "item/autoApprovalReview/started", map[string]any{
 		"threadId":     "thr-1",
 		"turnId":       "turn-1",
@@ -964,6 +1047,11 @@ func TestPromptMapsExtendedNotifications(t *testing.T) {
 		"toModel":   "gpt-5.4-mini",
 		"reason":    "highRiskCyberActivity",
 	})
+	queueNotification(session, "model/verification", map[string]any{
+		"threadId":      "thr-1",
+		"turnId":        "turn-1",
+		"verifications": []any{"trustedAccessForCyber"},
+	})
 	queueNotification(session, "configWarning", map[string]any{
 		"summary": "Invalid config value",
 		"path":    "/tmp/config.toml",
@@ -979,6 +1067,15 @@ func TestPromptMapsExtendedNotifications(t *testing.T) {
 	queueNotification(session, "account/updated", map[string]any{})
 	queueNotification(session, "app/list/updated", map[string]any{})
 	queueNotification(session, "skills/changed", map[string]any{})
+	queueNotification(session, "externalAgentConfig/import/completed", map[string]any{})
+	queueNotification(session, "guardianWarning", map[string]any{
+		"threadId": "thr-1",
+		"message":  "guardian warning",
+	})
+	queueNotification(session, "warning", map[string]any{
+		"threadId": "thr-1",
+		"message":  "warning",
+	})
 	queueNotification(session, "thread/compacted", map[string]any{
 		"threadId": "thr-1",
 	})
@@ -1033,6 +1130,20 @@ func TestPromptMapsExtendedNotifications(t *testing.T) {
 		"threadId": "thr-1",
 		"role":     "assistant",
 		"text":     "hello realtime",
+	})
+	queueNotification(session, "thread/realtime/transcript/delta", map[string]any{
+		"threadId": "thr-1",
+		"role":     "assistant",
+		"delta":    "hello",
+	})
+	queueNotification(session, "thread/realtime/transcript/done", map[string]any{
+		"threadId": "thr-1",
+		"role":     "assistant",
+		"text":     "hello",
+	})
+	queueNotification(session, "thread/realtime/sdp", map[string]any{
+		"threadId": "thr-1",
+		"sdp":      "v=0",
 	})
 	queueNotification(session, "thread/realtime/error", map[string]any{
 		"threadId": "thr-1",
@@ -1125,11 +1236,11 @@ func TestPromptMapsExtendedNotifications(t *testing.T) {
 	if !containsPlanEntry(updates, "Run tests") {
 		t.Fatalf("missing aggregated plan delta update: %#v", updates)
 	}
-	if countThoughtText(updates, "Thread status: active (waitingOnApproval)") != 1 {
-		t.Fatalf("expected deduplicated thread status thought, updates: %#v", updates)
-	}
 	if !containsToolCallText(updates, "y\n") {
 		t.Fatalf("missing terminal interaction content: %#v", updates)
+	}
+	if !containsToolCallText(updates, "@@ -1 +1 @@\n-old\n+new") {
+		t.Fatalf("missing patchUpdated tool call content: %#v", updates)
 	}
 	if !containsToolCall(updates, "codex-guardian-item-cmd-1") {
 		t.Fatalf("missing guardian synthetic tool call updates: %#v", updates)
@@ -1137,83 +1248,11 @@ func TestPromptMapsExtendedNotifications(t *testing.T) {
 	if !containsToolCall(updates, "codex-hook-hk-1") {
 		t.Fatalf("missing hook synthetic tool call updates: %#v", updates)
 	}
-	if !containsThoughtSubstring(updates, "Model rerouted:") {
-		t.Fatalf("missing model rerouted thought update: %#v", updates)
+	if countThoughtText(updates, "Reasoning summary part added (#2).") != 0 {
+		t.Fatalf("unexpected reasoning summary part thought update: %#v", updates)
 	}
-	if !containsThoughtSubstring(updates, "Config warning:") {
-		t.Fatalf("missing config warning thought update: %#v", updates)
-	}
-	if !containsThoughtSubstring(updates, "Deprecation notice:") {
-		t.Fatalf("missing deprecation notice thought update: %#v", updates)
-	}
-	if !containsThoughtSubstring(updates, "Account login completed: acc-1.") {
-		t.Fatalf("missing account login completed thought update: %#v", updates)
-	}
-	if !containsThoughtSubstring(updates, "Account updated.") {
-		t.Fatalf("missing account updated thought update: %#v", updates)
-	}
-	if !containsThoughtSubstring(updates, "App list updated.") {
-		t.Fatalf("missing app list updated thought update: %#v", updates)
-	}
-	if !containsThoughtSubstring(updates, "Skills changed.") {
-		t.Fatalf("missing skills changed thought update: %#v", updates)
-	}
-	if !containsThoughtSubstring(updates, "Thread compacted.") {
-		t.Fatalf("missing thread compacted thought update: %#v", updates)
-	}
-	if !containsThoughtSubstring(updates, "Thread archived.") {
-		t.Fatalf("missing thread archived thought update: %#v", updates)
-	}
-	if !containsThoughtSubstring(updates, "Thread unarchived.") {
-		t.Fatalf("missing thread unarchived thought update: %#v", updates)
-	}
-	if !containsThoughtSubstring(updates, "Thread closed.") {
-		t.Fatalf("missing thread closed thought update: %#v", updates)
-	}
-	if !containsThoughtSubstring(updates, "Thread name updated: ACP Mapping Thread.") {
-		t.Fatalf("missing thread name updated thought update: %#v", updates)
-	}
-	if !containsThoughtSubstring(updates, "Windows world-writable warning: 2 additional path(s). sample=C:/tmp/a,C:/tmp/b") {
-		t.Fatalf("missing windows world-writable warning thought update: %#v", updates)
-	}
-	if !containsThoughtSubstring(updates, "Windows sandbox setup succeeded (mode=sandbox).") {
-		t.Fatalf("missing windows sandbox setup thought update: %#v", updates)
-	}
-	if !containsThoughtSubstring(updates, "Realtime started (version=v1, session=rt-1).") {
-		t.Fatalf("missing realtime started thought update: %#v", updates)
-	}
-	if !containsThoughtSubstring(updates, "Realtime item added (type=message).") {
-		t.Fatalf("missing realtime item added thought update: %#v", updates)
-	}
-	if !containsThoughtSubstring(updates, "Realtime audio delta: item=rt-item-1 sampleRate=24000 channels=1 bytes=4.") {
-		t.Fatalf("missing realtime audio delta thought update: %#v", updates)
-	}
-	if !containsThoughtSubstring(updates, "Realtime transcript (assistant): hello realtime") {
-		t.Fatalf("missing realtime transcript thought update: %#v", updates)
-	}
-	if !containsThoughtSubstring(updates, "Realtime error: transport issue") {
-		t.Fatalf("missing realtime error thought update: %#v", updates)
-	}
-	if !containsThoughtSubstring(updates, "Realtime closed: done") {
-		t.Fatalf("missing realtime closed thought update: %#v", updates)
-	}
-	if !containsThoughtSubstring(updates, "Filesystem changed: watch=watch-1 paths=2.") {
-		t.Fatalf("missing fs changed thought update: %#v", updates)
-	}
-	if !containsThoughtSubstring(updates, "Fuzzy search update: session=fuzzy-1 query=\"agent\" files=1.") {
-		t.Fatalf("missing fuzzy session updated thought update: %#v", updates)
-	}
-	if !containsThoughtSubstring(updates, "Fuzzy search completed: session=fuzzy-1.") {
-		t.Fatalf("missing fuzzy session completed thought update: %#v", updates)
-	}
-	if !containsThoughtSubstring(updates, "command/exec output: process=proc-1 stream=stdout bytes(base64)=4 capReached=false.") {
-		t.Fatalf("missing command/exec output delta thought update: %#v", updates)
-	}
-	if !containsThoughtSubstring(updates, "Turn diff updated:\n@@ -1 +1 @@\n-foo\n+bar\n  tail") {
-		t.Fatalf("missing turn diff update with preserved formatting: %#v", updates)
-	}
-	if !containsThoughtSubstring(updates, "MCP server") {
-		t.Fatalf("missing mcp status thought update: %#v", updates)
+	if countThoughtChunks(updates) != 0 {
+		t.Fatalf("unexpected non-reasoning thought updates: %#v", updates)
 	}
 	meta, ok := promptResp.Meta.(map[string]any)
 	if !ok {
@@ -1261,8 +1300,8 @@ func TestPromptStopsOnErrorNotificationWithoutRetry(t *testing.T) {
 		t.Fatalf("StopReason = %q, want %q", promptResp.StopReason, acp.StopReasonRefusal)
 	}
 	updates := conn.sessionUpdates(newResp.SessionId)
-	if !containsThoughtSubstring(updates, "fatal boom") {
-		t.Fatalf("missing error thought update: %#v", updates)
+	if countThoughtChunks(updates) != 0 {
+		t.Fatalf("unexpected thought updates after error notification: %#v", updates)
 	}
 }
 
@@ -1381,10 +1420,11 @@ func TestPromptForwardsSessionScopedUpdatesAfterCompletion(t *testing.T) {
 	}
 
 	queueNotification(session, "account/updated", map[string]any{})
-	waitForCondition(t, time.Second, func() bool {
-		updates := conn.sessionUpdates(newResp.SessionId)
-		return containsThoughtSubstring(updates, "Account updated.")
-	}, "missing account update thought after prompt completion")
+	time.Sleep(50 * time.Millisecond)
+	updates := conn.sessionUpdates(newResp.SessionId)
+	if countThoughtChunks(updates) != 0 {
+		t.Fatalf("unexpected thought updates after completion for session-scoped event: %#v", updates)
+	}
 }
 
 func TestPromptRebindsTurnIDFromTurnStartedNotification(t *testing.T) {
@@ -1520,8 +1560,8 @@ func TestPromptRebindsThreadIDFromThreadStartedNotification(t *testing.T) {
 	}
 
 	updates := conn.sessionUpdates(newResp.SessionId)
-	if !containsThoughtSubstring(updates, "Thread status: active") {
-		t.Fatalf("missing thread status update after thread-id rebind: %#v", updates)
+	if countThoughtChunks(updates) != 0 {
+		t.Fatalf("unexpected thought updates after thread-id rebind: %#v", updates)
 	}
 }
 
@@ -2224,6 +2264,19 @@ func containsToolCall(updates []acp.SessionNotification, toolCallID string) bool
 	return false
 }
 
+func countToolCallEvents(updates []acp.SessionNotification) int {
+	count := 0
+	for _, update := range updates {
+		if update.Update.ToolCall != nil {
+			count++
+		}
+		if update.Update.ToolCallUpdate != nil {
+			count++
+		}
+	}
+	return count
+}
+
 func containsToolCallText(updates []acp.SessionNotification, text string) bool {
 	for _, update := range updates {
 		callUpdate := update.Update.ToolCallUpdate
@@ -2260,6 +2313,16 @@ func countThoughtText(updates []acp.SessionNotification, text string) int {
 			if chunk.Content.Text.Text == text {
 				count++
 			}
+		}
+	}
+	return count
+}
+
+func countThoughtChunks(updates []acp.SessionNotification) int {
+	count := 0
+	for _, update := range updates {
+		if update.Update.AgentThoughtChunk != nil {
+			count++
 		}
 	}
 	return count

@@ -74,7 +74,6 @@ acp-repl -- codex-acp-bridge
   - MCP startup visibility:
     - `session/new._meta.codex.mcp` includes `contract` and requested server descriptors.
     - `session/prompt._meta.codex.mcp.startupStatus` includes latest startup status/error for requested servers.
-    - MCP startup and OAuth events are also forwarded as thought updates.
 - Supports `session/set_model` and `session/set_mode` for ACP session state.
   - `session/set_model` updates model selection used by subsequent `turn/start` calls.
   - `session/set_mode` is stored in ACP session state only; current bridge implementation does not forward mode into backend `thread/start` or `turn/start` payload fields.

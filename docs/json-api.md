@@ -1,18 +1,20 @@
 # JSON API Specification
 
 Status: draft  
-Date: 2026-04-12  
+Date: 2026-04-24  
 Audience: `codex-acp-bridge` adapter maintainers
 
 ## Source of truth
 
 This document is code-first for codex-acp-bridge behavior:
-- backend schema shape comes from `codex backend` JSON schema output.
+- backend schema shape comes from `codex app-server` JSON schema output.
 - adapter projection semantics come from `internal/apps/codexacpbridge` implementation and tests.
 
 ```bash
-codex backend generate-json-schema --experimental --out /tmp/codex-app-schema-docspec
+codex app-server generate-json-schema --experimental --out /tmp/codex-app-schema-docspec
 ```
+
+The current inventory in this document was refreshed from `codex-cli 0.124.0`.
 
 Primary files:
 - `/tmp/codex-app-schema-docspec/ServerNotification.json`
@@ -23,7 +25,7 @@ This document does not require backend source internals; it documents observable
 
 ## API surface summary
 
-- Server notifications: 51 methods
+- Server notifications: 58 methods
 - Server-initiated requests: 9 methods
 - `ThreadItem` variants: 16 types
 - `ThreadStatus.activeFlags`: `waitingOnApproval`, `waitingOnUserInput`
@@ -41,36 +43,56 @@ This document does not require backend source internals; it documents observable
 
 The adapter should project Codex backend events into ACP session semantics as follows.
 
+`session/update.agent_thought_chunk` is reserved for reasoning text deltas (`item/reasoning/textDelta`, `item/reasoning/summaryTextDelta`) only.
+
 ### Core notification mapping
 
 | Codex method | Required params | ACP projection | Notes |
 | --- | --- | --- | --- |
 | `thread/started` | `thread` | session/thread started metadata | Use `thread.id` as backend thread handle. |
-| `thread/status/changed` | `threadId,status` | status update | Forward `status.type`; include `activeFlags` if present. |
+| `thread/status/changed` | `threadId,status` | no ACP streaming update | Recognized operational status. No ACP-native status stream is emitted. |
 | `turn/started` | `threadId,turn` | turn started | Keep `turn.id` for correlation. |
-| `item/started` | `threadId,turnId,item` | item lifecycle started | Branch on `item.type`. |
+| `item/started` | `threadId,turnId,item` | item lifecycle started | Emits ACP tool-call lifecycle only for tool-like item types. Non-tool items such as `reasoning`, `plan`, and `agentMessage` are ignored here. |
 | `item/agentMessage/delta` | `threadId,turnId,itemId,delta` | `session/update.agent_message_chunk` | Append delta byte-for-byte. |
-| `item/plan/delta` | `threadId,turnId,itemId,delta` | `session/update.agent_thought_chunk` or plan channel | Mark as experimental. |
+| `item/plan/delta` | `threadId,turnId,itemId,delta` | `session/update.plan` | Aggregates deltas by `itemId`; plan deltas are not thoughts. |
 | `item/reasoning/textDelta` | `threadId,turnId,itemId,contentIndex,delta` | `session/update.agent_thought_chunk` | Preserve index ordering. |
-| `item/reasoning/summaryPartAdded` | `threadId,turnId,itemId,summaryIndex` | `session/update.agent_thought_chunk` | Emits a summary progress thought string (no separate summary bucket state). |
+| `item/reasoning/summaryPartAdded` | `threadId,turnId,itemId,summaryIndex` | no ACP streaming update | Structural marker only; no text payload to project. |
 | `item/reasoning/summaryTextDelta` | `threadId,turnId,itemId,summaryIndex,delta` | `session/update.agent_thought_chunk` | Append by summary index. |
 | `item/commandExecution/outputDelta` | `threadId,turnId,itemId,delta` | `session/update.tool_call_update` | Text output chunk for command item. |
 | `item/fileChange/outputDelta` | `threadId,turnId,itemId,delta` | `session/update.tool_call_update` | Streaming patch preview/update. |
+| `item/fileChange/patchUpdated` | `threadId,turnId,itemId,changes` | `session/update.tool_call_update` | Joins `changes[].diff` as tool content and preserves raw output. |
 | `item/mcpToolCall/progress` | `threadId,turnId,itemId,message` | `session/update.tool_call_update` | Progress text. |
-| `item/completed` | `threadId,turnId,item` | item lifecycle completed | Finalize item state by `item.type`. |
+| `item/completed` | `threadId,turnId,item` | item lifecycle completed | Finalizes ACP tool-call lifecycle only for tool-like item types. Non-tool items such as `reasoning`, `plan`, and `agentMessage` are ignored here. |
 | `turn/plan/updated` | `threadId,turnId,plan` | plan snapshot update | Snapshot; do not assume continuity with deltas. |
-| `turn/diff/updated` | `threadId,turnId,diff` | diff snapshot update | Unified diff at turn scope. |
+| `turn/diff/updated` | `threadId,turnId,diff` | no ACP streaming update | Diff is not emitted as thought/message/tool content. |
 | `thread/tokenUsage/updated` | `threadId,turnId,tokenUsage` | usage update | Forwards `tokenUsage.last.{inputTokens,outputTokens,totalTokens,cachedInputTokens}` into ACP meta usage (`cachedInputTokens` -> `cachedReadTokens`). |
 | `error` | `threadId,turnId,error,willRetry` | error event | If `willRetry=false`, finalize turn as failed/interrupted. |
-| `turn/completed` | `threadId,turn` | turn completed | Terminal per-turn signal. |
+| `turn/completed` | `threadId,turn` | turn completed | Authoritative prompt terminal signal. Latest schema does not require a top-level `turnId`; if present, it must match the active turn. |
 | `serverRequest/resolved` | `threadId,requestId` | request lifecycle ack | Clear pending request state. |
+
+### Turn completion
+
+`turn/completed` is the normal authoritative terminal signal for an ACP prompt. Do not infer prompt completion from final text chunks, `item/completed`, tool-call updates, plan updates, or `turn/diff/updated`.
+
+Latest app-server schema requires `threadId` and `turn` for `turn/completed`; it does not require a top-level `turnId`. The bridge still applies active-prompt correlation before completing:
+- there must be an active ACP prompt for the session;
+- `threadId` must match the active backend thread;
+- if a top-level `turnId` is present, it must match the active turn.
+
+ACP stop reason is derived from `turn.status`:
+- `completed` -> `end_turn`
+- `interrupted` -> `cancelled`
+- `failed` -> `refusal`
+- missing, unknown, or `inProgress` -> `end_turn`
+
+`error` with `willRetry=false` is the exceptional terminal path and maps to `refusal`; retried errors do not complete the ACP prompt. Usage attached to `session/prompt` completion comes from token usage on the terminal event when present, otherwise from the latest `thread/tokenUsage/updated` notification observed for the session.
 
 ### Command output distinction
 
 `command/exec/outputDelta` and `item/commandExecution/outputDelta` are different channels and must not be merged blindly.
 
 - `command/exec/outputDelta`: connection-scoped raw process stream with `deltaBase64`, `processId`, `stream`, `capReached`.
-  - Current adapter behavior: emits an ACP thought summary containing process/stream/size/cap metadata; it does not forward raw decoded bytes into ACP content fields.
+  - Current adapter behavior: does not project this channel into ACP content/thought updates.
 - `item/commandExecution/outputDelta`: turn/item-scoped text stream keyed by `itemId`.
 
 ### Server request mapping
@@ -108,80 +130,75 @@ For request types without a native ACP equivalent, the adapter uses ACP `session
   `CODEX_CHATGPT_ACCESS_TOKEN`, `CODEX_CHATGPT_ACCOUNT_ID`, optional `CODEX_CHATGPT_PLAN_TYPE`;
   otherwise returns a structured request error.
 
-## Coverage tiers (recommended)
+## Projection groups
 
-### Tier 1 (must map now)
+### ACP streaming updates
 
-- `thread/started`
-- `thread/status/changed`
-- `turn/started`
-- `item/started`
-- `item/agentMessage/delta`
-- `item/completed`
-- `turn/completed`
-- `error`
-- `serverRequest/resolved`
-- `item/commandExecution/requestApproval`
-- `item/fileChange/requestApproval`
-- `item/permissions/requestApproval`
-- `item/tool/call`
-- `item/tool/requestUserInput`
-- `mcpServer/elicitation/request`
-- `thread/tokenUsage/updated`
+- Agent text: `item/agentMessage/delta`.
+- Agent thoughts: `item/reasoning/textDelta`, `item/reasoning/summaryTextDelta`.
+- Plans: `item/plan/delta`, `turn/plan/updated`.
+- Tool calls: `item/started` and `item/completed` for tool-like item types only,
+  `item/commandExecution/outputDelta`,
+  `item/commandExecution/terminalInteraction`, `item/fileChange/outputDelta`,
+  `item/fileChange/patchUpdated`, `item/mcpToolCall/progress`,
+  `item/autoApprovalReview/started`, `item/autoApprovalReview/completed`,
+  `hook/started`, `hook/completed`.
 
-### Tier 2 (should map)
+### Prompt/session state
 
-- `item/plan/delta`
-- `item/reasoning/textDelta`
-- `item/reasoning/summaryPartAdded`
-- `item/reasoning/summaryTextDelta`
-- `item/commandExecution/outputDelta`
-- `item/commandExecution/terminalInteraction`
-- `item/fileChange/outputDelta`
-- `item/mcpToolCall/progress`
-- `item/autoApprovalReview/started`
-- `item/autoApprovalReview/completed`
-- `turn/plan/updated`
-- `turn/diff/updated`
-- `model/rerouted`
-- `thread/compacted`
-- `mcpServer/startupStatus/updated`
-- `mcpServer/oauthLogin/completed`
-- `account/rateLimits/updated`
-- `account/updated`
-- `account/login/completed`
-- `skills/changed`
-- `app/list/updated`
+- Prompt completion: `turn/completed`; `error` with `willRetry=false`.
+- Usage and metadata: `thread/tokenUsage/updated`, `account/rateLimits/updated`,
+  `mcpServer/startupStatus/updated`.
+- Request lifecycle: `serverRequest/resolved`.
+- Thread correlation: `thread/started`, `turn/started`.
 
-### Tier 3 (optional/experimental)
+### Recognized no-op notifications
 
-- `thread/realtime/started`
-- `thread/realtime/itemAdded`
-- `thread/realtime/transcriptUpdated`
-- `thread/realtime/outputAudio/delta`
-- `thread/realtime/error`
-- `thread/realtime/closed`
-- `fuzzyFileSearch/sessionUpdated`
-- `fuzzyFileSearch/sessionCompleted`
-- `fs/changed`
-- `command/exec/outputDelta`
-- `hook/started`
-- `hook/completed`
-- `deprecationNotice`
-- `configWarning`
-- `windows/worldWritableWarning`
-- `windowsSandbox/setupCompleted`
-- `thread/archived`
-- `thread/unarchived`
-- `thread/closed`
-- `thread/name/updated`
-- `account/chatgptAuthTokens/refresh`
-- `applyPatchApproval`
-- `execCommandApproval`
+These notifications are accepted for schema compatibility but are not projected into ACP
+message, thought, plan, or tool-call updates:
+
+```text
+account/login/completed
+account/updated
+app/list/updated
+command/exec/outputDelta
+configWarning
+deprecationNotice
+externalAgentConfig/import/completed
+fs/changed
+fuzzyFileSearch/sessionCompleted
+fuzzyFileSearch/sessionUpdated
+guardianWarning
+item/reasoning/summaryPartAdded
+mcpServer/oauthLogin/completed
+model/rerouted
+model/verification
+skills/changed
+thread/archived
+thread/closed
+thread/compacted
+thread/name/updated
+thread/realtime/closed
+thread/realtime/error
+thread/realtime/itemAdded
+thread/realtime/outputAudio/delta
+thread/realtime/sdp
+thread/realtime/started
+thread/realtime/transcript/delta
+thread/realtime/transcript/done
+thread/status/changed
+thread/unarchived
+turn/diff/updated
+warning
+windows/worldWritableWarning
+windowsSandbox/setupCompleted
+```
+
+The adapter also recognizes legacy `thread/realtime/transcriptUpdated` as a no-op for backward compatibility.
 
 ## Full method inventory
 
-### Notifications (51)
+### Notifications (58)
 
 ```text
 account/login/completed
@@ -192,9 +209,11 @@ command/exec/outputDelta
 configWarning
 deprecationNotice
 error
+externalAgentConfig/import/completed
 fs/changed
 fuzzyFileSearch/sessionCompleted
 fuzzyFileSearch/sessionUpdated
+guardianWarning
 hook/completed
 hook/started
 item/agentMessage/delta
@@ -204,6 +223,7 @@ item/commandExecution/outputDelta
 item/commandExecution/terminalInteraction
 item/completed
 item/fileChange/outputDelta
+item/fileChange/patchUpdated
 item/mcpToolCall/progress
 item/plan/delta
 item/reasoning/summaryPartAdded
@@ -213,6 +233,7 @@ item/started
 mcpServer/oauthLogin/completed
 mcpServer/startupStatus/updated
 model/rerouted
+model/verification
 serverRequest/resolved
 skills/changed
 thread/archived
@@ -223,8 +244,10 @@ thread/realtime/closed
 thread/realtime/error
 thread/realtime/itemAdded
 thread/realtime/outputAudio/delta
+thread/realtime/sdp
 thread/realtime/started
-thread/realtime/transcriptUpdated
+thread/realtime/transcript/delta
+thread/realtime/transcript/done
 thread/started
 thread/status/changed
 thread/tokenUsage/updated
@@ -233,6 +256,7 @@ turn/completed
 turn/diff/updated
 turn/plan/updated
 turn/started
+warning
 windows/worldWritableWarning
 windowsSandbox/setupCompleted
 ```
@@ -261,7 +285,7 @@ mcpServer/elicitation/request
 
 ## Known pitfalls to avoid
 
-- Do not infer end-of-turn from last message chunk; wait for `turn/completed`.
+- Do not infer end-of-turn from last message chunk, item completion, tool completion, plan updates, or diff updates; wait for `turn/completed` unless terminal `error` with `willRetry=false` arrives.
 - Do not treat plan deltas as authoritative final plan text.
 - Do not mix connection-scoped `command/exec/outputDelta` with turn-scoped command item output.
 - Do not drop or rewrite whitespace in message or reasoning deltas.
@@ -269,4 +293,5 @@ mcpServer/elicitation/request
 
 ## Implementation status (current)
 
-- `internal/apps/codexacpbridge` currently maps all methods listed in this schema inventory (`51` notifications, `9` server requests).
+- `internal/apps/codexacpbridge` currently recognizes all methods listed in this schema inventory (`58` notifications, `9` server requests).
+- Recognized no-op notifications are intentionally not projected into ACP streaming updates.

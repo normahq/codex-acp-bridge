@@ -71,11 +71,10 @@ type codexProxySessionState struct {
 
 	workerCancel context.CancelFunc
 
-	planDeltaByItem      map[string]string
-	pendingRequests      map[string]string
-	lastThreadStatusText string
-	latestRateLimits     map[string]any
-	latestUsage          map[string]any
+	planDeltaByItem  map[string]string
+	pendingRequests  map[string]string
+	latestRateLimits map[string]any
+	latestUsage      map[string]any
 }
 
 type sessionMCPStartup struct {
@@ -317,7 +316,6 @@ func (a *codexACPProxyAgent) Prompt(ctx context.Context, params acp.PromptReques
 		current.turnID = turnID
 		current.planDeltaByItem = make(map[string]string)
 		current.pendingRequests = make(map[string]string)
-		current.lastThreadStatusText = ""
 		current.latestUsage = nil
 	}
 	a.mu.Unlock()
@@ -709,32 +707,13 @@ func (a *codexACPProxyAgent) handleNotification(
 			a.syncThreadID(sessionID, startedThreadID)
 		}
 	case "error":
-		errObj := mapValue(params, "error")
-		msg := stringValue(errObj, "message")
-		details := rawStringValue(errObj, "additionalDetails")
-		thought := strings.TrimSpace(msg)
-		if thought == "" {
-			thought = "Turn error."
-		}
-		if strings.TrimSpace(details) != "" {
-			thought = fmt.Sprintf("%s %s", thought, strings.TrimSpace(details))
-		}
-		if err := a.sendThoughtUpdate(ctx, sessionID, thought); err != nil {
-			return false, "", nil, err
-		}
 		willRetry, ok := boolValue(params, "willRetry")
 		if ok && !willRetry {
 			return true, acp.StopReasonRefusal, usageFromTokenNotification(params), nil
 		}
 	case "thread/status/changed":
-		status := mapValue(params, "status")
-		summary := threadStatusSummary(status)
-		if summary == "" || !a.shouldEmitThreadStatus(sessionID, summary) {
-			return false, "", nil, nil
-		}
-		if err := a.sendThoughtUpdate(ctx, sessionID, "Thread status: "+summary); err != nil {
-			return false, "", nil, err
-		}
+	case "item/reasoning/summaryPartAdded":
+	case "turn/diff/updated":
 	case methodTurnStarted:
 		turn := mapValue(params, "turn")
 		startedTurnID := stringValue(turn, "id")
@@ -756,15 +735,6 @@ func (a *codexACPProxyAgent) handleNotification(
 			return false, "", nil, nil
 		}
 		if err := a.sendUpdate(ctx, sessionID, acp.UpdateAgentThoughtText(delta)); err != nil {
-			return false, "", nil, err
-		}
-	case "item/reasoning/summaryPartAdded":
-		summaryIndex, ok := int64Value(params, "summaryIndex")
-		thought := "Reasoning summary updated."
-		if ok {
-			thought = fmt.Sprintf("Reasoning summary part added (#%d).", summaryIndex)
-		}
-		if err := a.sendThoughtUpdate(ctx, sessionID, thought); err != nil {
 			return false, "", nil, err
 		}
 	case "item/plan/delta":
@@ -791,14 +761,6 @@ func (a *codexACPProxyAgent) handleNotification(
 				return false, "", nil, err
 			}
 		}
-	case "turn/diff/updated":
-		diff := rawStringValue(params, "diff")
-		if diff == "" {
-			return false, "", nil, nil
-		}
-		if err := a.sendUpdate(ctx, sessionID, acp.UpdateAgentThoughtText("Turn diff updated:\n"+diff)); err != nil {
-			return false, "", nil, err
-		}
 	case "item/started":
 		item := mapValue(params, "item")
 		if len(item) == 0 {
@@ -807,6 +769,9 @@ func (a *codexACPProxyAgent) handleNotification(
 		itemType := stringValue(item, "type")
 		itemID := stringValue(item, "id")
 		if itemType == "" || itemID == "" {
+			return false, "", nil, nil
+		}
+		if !isToolLifecycleItemType(itemType) {
 			return false, "", nil, nil
 		}
 		title := toolCallTitle(itemType, item)
@@ -823,6 +788,10 @@ func (a *codexACPProxyAgent) handleNotification(
 	case "item/completed":
 		item := mapValue(params, "item")
 		if len(item) == 0 {
+			return false, "", nil, nil
+		}
+		itemType := stringValue(item, "type")
+		if !isToolLifecycleItemType(itemType) {
 			return false, "", nil, nil
 		}
 		itemID := stringValue(item, "id")
@@ -848,6 +817,21 @@ func (a *codexACPProxyAgent) handleNotification(
 			toolCallID(itemID),
 			acp.WithUpdateStatus(acp.ToolCallStatusInProgress),
 			acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock(delta))}),
+		)
+		if err := a.sendUpdate(ctx, sessionID, update); err != nil {
+			return false, "", nil, err
+		}
+	case "item/fileChange/patchUpdated":
+		itemID := stringValue(params, "itemId")
+		patchText := fileChangePatchUpdatedText(params)
+		if itemID == "" || patchText == "" {
+			return false, "", nil, nil
+		}
+		update := acp.UpdateToolCall(
+			toolCallID(itemID),
+			acp.WithUpdateStatus(acp.ToolCallStatusInProgress),
+			acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock(patchText))}),
+			acp.WithUpdateRawOutput(params),
 		)
 		if err := a.sendUpdate(ctx, sessionID, update); err != nil {
 			return false, "", nil, err
@@ -980,254 +964,38 @@ func (a *codexACPProxyAgent) handleNotification(
 		status := stringValue(params, "status")
 		errText := stringValue(params, "error")
 		a.setSessionMCPStartupStatus(sessionID, name, status, errText)
-		thought := fmt.Sprintf("MCP server %q status: %s.", name, status)
-		if name == "" {
-			thought = fmt.Sprintf("MCP server status: %s.", status)
-		}
-		if strings.TrimSpace(errText) != "" {
-			thought += " " + errText
-		}
-		if err := a.sendThoughtUpdate(ctx, sessionID, thought); err != nil {
-			return false, "", nil, err
-		}
 	case "mcpServer/oauthLogin/completed":
-		name := stringValue(params, "name")
-		success, ok := boolValue(params, "success")
-		errText := stringValue(params, "error")
-		outcome := statusCompleted
-		if ok && !success {
-			outcome = statusFailed
-		}
-		thought := fmt.Sprintf("MCP OAuth login %s.", outcome)
-		if name != "" {
-			thought = fmt.Sprintf("MCP OAuth login for %q %s.", name, outcome)
-		}
-		if strings.TrimSpace(errText) != "" {
-			thought += " " + errText
-		}
-		if err := a.sendThoughtUpdate(ctx, sessionID, thought); err != nil {
-			return false, "", nil, err
-		}
 	case "model/rerouted":
-		fromModel := stringValue(params, "fromModel")
-		toModel := stringValue(params, "toModel")
-		reason := stringValue(params, "reason")
-		thought := fmt.Sprintf("Model rerouted: %s -> %s.", fromModel, toModel)
-		if fromModel == "" || toModel == "" {
-			thought = "Model rerouted."
-		}
-		if reason != "" {
-			thought = strings.TrimSpace(thought + " reason: " + reason + ".")
-		}
-		if err := a.sendThoughtUpdate(ctx, sessionID, thought); err != nil {
-			return false, "", nil, err
-		}
+	case "model/verification":
 	case "configWarning":
-		summary := stringValue(params, "summary")
-		path := stringValue(params, "path")
-		details := stringValue(params, "details")
-		thought := "Config warning."
-		if summary != "" {
-			thought = "Config warning: " + summary
-		}
-		if path != "" {
-			thought += " path=" + path
-		}
-		if details != "" {
-			thought += " " + details
-		}
-		if err := a.sendThoughtUpdate(ctx, sessionID, thought); err != nil {
-			return false, "", nil, err
-		}
 	case "deprecationNotice":
-		summary := stringValue(params, "summary")
-		details := stringValue(params, "details")
-		thought := "Deprecation notice."
-		if summary != "" {
-			thought = "Deprecation notice: " + summary
-		}
-		if details != "" {
-			thought += " " + details
-		}
-		if err := a.sendThoughtUpdate(ctx, sessionID, thought); err != nil {
-			return false, "", nil, err
-		}
 	case "account/login/completed":
-		accountID := stringValue(params, "accountId")
-		thought := "Account login completed."
-		if accountID != "" {
-			thought = fmt.Sprintf("Account login completed: %s.", accountID)
-		}
-		if err := a.sendThoughtUpdate(ctx, sessionID, thought); err != nil {
-			return false, "", nil, err
-		}
 	case "account/updated":
-		if err := a.sendThoughtUpdate(ctx, sessionID, "Account updated."); err != nil {
-			return false, "", nil, err
-		}
 	case "app/list/updated":
-		if err := a.sendThoughtUpdate(ctx, sessionID, "App list updated."); err != nil {
-			return false, "", nil, err
-		}
 	case "skills/changed":
-		if err := a.sendThoughtUpdate(ctx, sessionID, "Skills changed."); err != nil {
-			return false, "", nil, err
-		}
+	case "externalAgentConfig/import/completed":
+	case "guardianWarning":
+	case "warning":
 	case "thread/compacted":
-		if err := a.sendThoughtUpdate(ctx, sessionID, "Thread compacted."); err != nil {
-			return false, "", nil, err
-		}
 	case "thread/archived":
-		if err := a.sendThoughtUpdate(ctx, sessionID, "Thread archived."); err != nil {
-			return false, "", nil, err
-		}
 	case "thread/unarchived":
-		if err := a.sendThoughtUpdate(ctx, sessionID, "Thread unarchived."); err != nil {
-			return false, "", nil, err
-		}
 	case "thread/closed":
-		if err := a.sendThoughtUpdate(ctx, sessionID, "Thread closed."); err != nil {
-			return false, "", nil, err
-		}
 	case "thread/name/updated":
-		threadName := stringValue(params, "threadName")
-		thought := "Thread name updated."
-		if threadName != "" {
-			thought = fmt.Sprintf("Thread name updated: %s.", threadName)
-		}
-		if err := a.sendThoughtUpdate(ctx, sessionID, thought); err != nil {
-			return false, "", nil, err
-		}
 	case "windows/worldWritableWarning":
-		extraCount, _ := int64Value(params, "extraCount")
-		failedScan, _ := boolValue(params, "failedScan")
-		samplePaths := listValue(params, "samplePaths")
-		pathSamples := make([]string, 0, len(samplePaths))
-		for _, rawPath := range samplePaths {
-			path, _ := rawPath.(string)
-			path = strings.TrimSpace(path)
-			if path == "" {
-				continue
-			}
-			pathSamples = append(pathSamples, path)
-		}
-		thought := fmt.Sprintf("Windows world-writable warning: %d additional path(s).", extraCount)
-		if len(pathSamples) > 0 {
-			thought = thought + " sample=" + strings.Join(pathSamples, ",")
-		}
-		if failedScan {
-			thought += " scan_failed=true"
-		}
-		if err := a.sendThoughtUpdate(ctx, sessionID, thought); err != nil {
-			return false, "", nil, err
-		}
 	case "windowsSandbox/setupCompleted":
-		mode := stringValue(params, "mode")
-		success, _ := boolValue(params, "success")
-		errText := stringValue(params, "error")
-		outcome := statusFailed
-		if success {
-			outcome = "succeeded"
-		}
-		thought := fmt.Sprintf("Windows sandbox setup %s (mode=%s).", outcome, mode)
-		if strings.TrimSpace(errText) != "" {
-			thought += " " + errText
-		}
-		if err := a.sendThoughtUpdate(ctx, sessionID, thought); err != nil {
-			return false, "", nil, err
-		}
 	case "thread/realtime/started":
-		version := stringValue(params, "version")
-		session := stringValue(params, "sessionId")
-		thought := fmt.Sprintf("Realtime started (version=%s).", version)
-		if session != "" {
-			thought = fmt.Sprintf("Realtime started (version=%s, session=%s).", version, session)
-		}
-		if err := a.sendThoughtUpdate(ctx, sessionID, thought); err != nil {
-			return false, "", nil, err
-		}
 	case "thread/realtime/itemAdded":
-		item := mapValue(params, "item")
-		itemType := stringValue(item, "type")
-		thought := "Realtime item added."
-		if itemType != "" {
-			thought = fmt.Sprintf("Realtime item added (type=%s).", itemType)
-		}
-		if err := a.sendThoughtUpdate(ctx, sessionID, thought); err != nil {
-			return false, "", nil, err
-		}
 	case "thread/realtime/outputAudio/delta":
-		audio := mapValue(params, "audio")
-		itemID := stringValue(audio, "itemId")
-		sampleRate, _ := int64Value(audio, "sampleRate")
-		numChannels, _ := int64Value(audio, "numChannels")
-		data := rawStringValue(audio, "data")
-		thought := fmt.Sprintf("Realtime audio delta: sampleRate=%d channels=%d bytes=%d.", sampleRate, numChannels, len(data))
-		if itemID != "" {
-			thought = fmt.Sprintf("Realtime audio delta: item=%s sampleRate=%d channels=%d bytes=%d.", itemID, sampleRate, numChannels, len(data))
-		}
-		if err := a.sendThoughtUpdate(ctx, sessionID, thought); err != nil {
-			return false, "", nil, err
-		}
 	case "thread/realtime/transcriptUpdated":
-		role := stringValue(params, "role")
-		text := rawStringValue(params, "text")
-		thought := "Realtime transcript updated."
-		if role != "" || text != "" {
-			thought = fmt.Sprintf("Realtime transcript (%s): %s", role, text)
-		}
-		if err := a.sendThoughtUpdate(ctx, sessionID, thought); err != nil {
-			return false, "", nil, err
-		}
+	case "thread/realtime/transcript/delta":
+	case "thread/realtime/transcript/done":
+	case "thread/realtime/sdp":
 	case "thread/realtime/error":
-		message := stringValue(params, "message")
-		thought := "Realtime error."
-		if message != "" {
-			thought = "Realtime error: " + message
-		}
-		if err := a.sendThoughtUpdate(ctx, sessionID, thought); err != nil {
-			return false, "", nil, err
-		}
 	case "thread/realtime/closed":
-		reason := stringValue(params, "reason")
-		thought := "Realtime closed."
-		if reason != "" {
-			thought = "Realtime closed: " + reason
-		}
-		if err := a.sendThoughtUpdate(ctx, sessionID, thought); err != nil {
-			return false, "", nil, err
-		}
 	case "fs/changed":
-		watchID := stringValue(params, "watchId")
-		changedPaths := listValue(params, "changedPaths")
-		pathCount := len(changedPaths)
-		thought := fmt.Sprintf("Filesystem changed: watch=%s paths=%d.", watchID, pathCount)
-		if err := a.sendThoughtUpdate(ctx, sessionID, thought); err != nil {
-			return false, "", nil, err
-		}
 	case "fuzzyFileSearch/sessionUpdated":
-		session := stringValue(params, "sessionId")
-		query := stringValue(params, "query")
-		files := listValue(params, "files")
-		thought := fmt.Sprintf("Fuzzy search update: session=%s query=%q files=%d.", session, query, len(files))
-		if err := a.sendThoughtUpdate(ctx, sessionID, thought); err != nil {
-			return false, "", nil, err
-		}
 	case "fuzzyFileSearch/sessionCompleted":
-		session := stringValue(params, "sessionId")
-		thought := fmt.Sprintf("Fuzzy search completed: session=%s.", session)
-		if err := a.sendThoughtUpdate(ctx, sessionID, thought); err != nil {
-			return false, "", nil, err
-		}
 	case "command/exec/outputDelta":
-		processID := stringValue(params, "processId")
-		stream := stringValue(params, "stream")
-		delta := rawStringValue(params, "deltaBase64")
-		capReached, _ := boolValue(params, "capReached")
-		thought := fmt.Sprintf("command/exec output: process=%s stream=%s bytes(base64)=%d capReached=%t.", processID, stream, len(delta), capReached)
-		if err := a.sendThoughtUpdate(ctx, sessionID, thought); err != nil {
-			return false, "", nil, err
-		}
 	case "account/rateLimits/updated":
 		rateLimits := mapValue(params, "rateLimits")
 		if len(rateLimits) > 0 {
@@ -1797,6 +1565,8 @@ func requiresActiveTurn(method string) bool {
 		return true
 	case "item/commandExecution/outputDelta", "item/fileChange/outputDelta":
 		return true
+	case "item/fileChange/patchUpdated":
+		return true
 	case "item/commandExecution/terminalInteraction":
 		return true
 	case "item/autoApprovalReview/started", "item/autoApprovalReview/completed":
@@ -1806,6 +1576,8 @@ func requiresActiveTurn(method string) bool {
 	case "item/mcpToolCall/progress":
 		return true
 	case "model/rerouted":
+		return true
+	case "model/verification":
 		return true
 	case "thread/tokenUsage/updated":
 		return true
@@ -1838,6 +1610,26 @@ func planEntriesFromNotification(params map[string]any) []acp.PlanEntry {
 		})
 	}
 	return entries
+}
+
+func fileChangePatchUpdatedText(params map[string]any) string {
+	changes := listValue(params, "changes")
+	if len(changes) == 0 {
+		return ""
+	}
+	diffs := make([]string, 0, len(changes))
+	for _, rawChange := range changes {
+		change, ok := rawChange.(map[string]any)
+		if !ok {
+			continue
+		}
+		diff := rawStringValue(change, "diff")
+		if diff == "" {
+			continue
+		}
+		diffs = append(diffs, diff)
+	}
+	return strings.Join(diffs, "\n")
 }
 
 func usageFromTokenNotification(params map[string]any) map[string]any {
@@ -1992,45 +1784,12 @@ func hookRunSummary(run map[string]any) string {
 	return strings.TrimSpace(strings.Join(parts, " "))
 }
 
-func threadStatusSummary(status map[string]any) string {
-	statusType := stringValue(status, "type")
-	if statusType == "" {
-		return ""
-	}
-	flags := listValue(status, "activeFlags")
-	if len(flags) == 0 {
-		return statusType
-	}
-	flagValues := make([]string, 0, len(flags))
-	for _, raw := range flags {
-		s, ok := raw.(string)
-		if !ok || strings.TrimSpace(s) == "" {
-			continue
-		}
-		flagValues = append(flagValues, strings.TrimSpace(s))
-	}
-	if len(flagValues) == 0 {
-		return statusType
-	}
-	sort.Strings(flagValues)
-	return fmt.Sprintf("%s (%s)", statusType, strings.Join(flagValues, ","))
-}
-
-func (a *codexACPProxyAgent) sendThoughtUpdate(ctx context.Context, sessionID acp.SessionId, text string) error {
-	trimmed := strings.TrimSpace(text)
-	if trimmed == "" {
-		return nil
-	}
-	return a.sendUpdate(ctx, sessionID, acp.UpdateAgentThoughtText(trimmed))
-}
-
 func (a *codexACPProxyAgent) resetTurnState(sessionID acp.SessionId) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if state := a.sessions[sessionID]; state != nil {
 		state.planDeltaByItem = make(map[string]string)
 		state.pendingRequests = make(map[string]string)
-		state.lastThreadStatusText = ""
 		state.latestUsage = nil
 	}
 }
@@ -2047,20 +1806,6 @@ func (a *codexACPProxyAgent) appendPlanDelta(sessionID acp.SessionId, itemID str
 	}
 	state.planDeltaByItem[itemID] += delta
 	return state.planDeltaByItem[itemID]
-}
-
-func (a *codexACPProxyAgent) shouldEmitThreadStatus(sessionID acp.SessionId, statusText string) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	state := a.sessions[sessionID]
-	if state == nil {
-		return true
-	}
-	if state.lastThreadStatusText == statusText {
-		return false
-	}
-	state.lastThreadStatusText = statusText
-	return true
 }
 
 func (a *codexACPProxyAgent) setSessionRateLimits(sessionID acp.SessionId, rateLimits map[string]any) {
@@ -2310,22 +2055,32 @@ func requestIDFromAny(value any) (string, bool) {
 	return canonicalRequestID(raw), true
 }
 
+func isToolLifecycleItemType(itemType string) bool {
+	switch strings.TrimSpace(itemType) {
+	case itemTypeCommandExecution, itemTypeFileChange, itemTypeMCPToolCall, itemTypeDynamicToolCall,
+		"collabAgentToolCall", "webSearch", "imageView", "imageGeneration":
+		return true
+	default:
+		return false
+	}
+}
+
 func toolCallTitle(itemType string, item map[string]any) string {
 	switch strings.TrimSpace(itemType) {
-	case "commandExecution":
+	case itemTypeCommandExecution:
 		if command := stringValue(item, "command"); command != "" {
 			return command
 		}
 		return "command execution"
-	case "fileChange":
+	case itemTypeFileChange:
 		return "file change"
-	case "mcpToolCall":
+	case itemTypeMCPToolCall:
 		tool := stringValue(item, "tool")
 		if tool != "" {
 			return tool
 		}
 		return "mcp tool call"
-	case "dynamicToolCall":
+	case itemTypeDynamicToolCall:
 		tool := stringValue(item, "tool")
 		if tool != "" {
 			return tool

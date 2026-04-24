@@ -11,6 +11,11 @@ const (
 	statusInProgress = "inProgress"
 	statusCompleted  = "completed"
 	statusFailed     = "failed"
+
+	itemTypeCommandExecution = "commandExecution"
+	itemTypeFileChange       = "fileChange"
+	itemTypeMCPToolCall      = "mcpToolCall"
+	itemTypeDynamicToolCall  = "dynamicToolCall"
 )
 
 func buildThreadStartParams(cwd string, cfg codexAppConfig, sessionModel string, sessionMCPServers map[string]acp.McpServer) map[string]any {
@@ -182,13 +187,13 @@ func codexMCPServersConfig(sessionMCPServers map[string]acp.McpServer) map[strin
 
 func toAppServerToolKind(itemType string) acp.ToolKind {
 	switch itemType {
-	case "commandExecution":
+	case itemTypeCommandExecution:
 		return acp.ToolKindExecute
-	case "fileChange":
+	case itemTypeFileChange:
 		return acp.ToolKindEdit
 	case "webSearch":
 		return acp.ToolKindFetch
-	case "mcpToolCall", "dynamicToolCall":
+	case itemTypeMCPToolCall, itemTypeDynamicToolCall:
 		return acp.ToolKindExecute
 	case "imageView":
 		return acp.ToolKindRead
