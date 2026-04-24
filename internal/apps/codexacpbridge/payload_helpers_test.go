@@ -178,7 +178,7 @@ func TestCodexMCPServersConfig(t *testing.T) {
 			},
 		},
 		"api": {
-			Http: &acp.McpServerHttp{
+			Http: &acp.McpServerHttpInline{
 				Url: "https://example.test/mcp",
 				Headers: []acp.HttpHeader{
 					{Name: "Authorization", Value: "Bearer abc"},

@@ -92,7 +92,7 @@ func TestAuthenticateReturnsEmptyResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Authenticate() error = %v", err)
 	}
-	if resp != (acp.AuthenticateResponse{}) {
+	if len(resp.Meta) != 0 {
 		t.Fatalf("Authenticate() response = %#v, want zero value", resp)
 	}
 }

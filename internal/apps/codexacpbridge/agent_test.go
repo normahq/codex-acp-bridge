@@ -159,10 +159,7 @@ func TestNewSessionAppliesCodexMetaOverridesToThreadStart(t *testing.T) {
 	if got, want := string(resp.SessionId), "session-meta-1"; got != want {
 		t.Fatalf("NewSession().SessionId = %q, want %q", got, want)
 	}
-	meta, ok := resp.Meta.(map[string]any)
-	if !ok {
-		t.Fatalf("NewSession().Meta type = %T, want map[string]any", resp.Meta)
-	}
+	meta := resp.Meta
 	codexMeta := mapValue(meta, "codex")
 	mcpMeta := mapValue(codexMeta, "mcp")
 	if got := stringValue(mcpMeta, "contract"); got != mcpContractMerge {
@@ -311,11 +308,11 @@ func TestSessionModeIsStoredButNotForwardedToBackendPayloads(t *testing.T) {
 		t.Fatalf("SetSessionMode() error = %v", err)
 	}
 
-	if _, err := agent.SetSessionModel(context.Background(), acp.SetSessionModelRequest{
+	if _, err := agent.UnstableSetSessionModel(context.Background(), acp.UnstableSetSessionModelRequest{
 		SessionId: newResp.SessionId,
-		ModelId:   acp.ModelId("gpt-5.5"),
+		ModelId:   acp.UnstableModelId("gpt-5.5"),
 	}); err != nil {
-		t.Fatalf("SetSessionModel() error = %v", err)
+		t.Fatalf("UnstableSetSessionModel() error = %v", err)
 	}
 
 	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
@@ -1254,10 +1251,7 @@ func TestPromptMapsExtendedNotifications(t *testing.T) {
 	if countThoughtChunks(updates) != 0 {
 		t.Fatalf("unexpected non-reasoning thought updates: %#v", updates)
 	}
-	meta, ok := promptResp.Meta.(map[string]any)
-	if !ok {
-		t.Fatalf("PromptResponse.Meta type = %T, want map[string]any", promptResp.Meta)
-	}
+	meta := promptResp.Meta
 	if _, ok := meta["usage"]; !ok {
 		t.Fatalf("PromptResponse.Meta.usage missing: %#v", promptResp.Meta)
 	}
@@ -1354,10 +1348,7 @@ func TestPromptMetaIncludesRequestedMCPStartupStatusOnly(t *testing.T) {
 		t.Fatalf("Prompt() error = %v", err)
 	}
 
-	meta, ok := promptResp.Meta.(map[string]any)
-	if !ok {
-		t.Fatalf("PromptResponse.Meta type = %T, want map[string]any", promptResp.Meta)
-	}
+	meta := promptResp.Meta
 	codexMeta := mapValue(meta, "codex")
 	mcpMeta := mapValue(codexMeta, "mcp")
 	if got := stringValue(mcpMeta, "contract"); got != mcpContractMerge {

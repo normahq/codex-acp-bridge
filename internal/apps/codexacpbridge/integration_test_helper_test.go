@@ -115,9 +115,9 @@ func (c *integrationACPClient) NewSessionWithMeta(
 }
 
 func (c *integrationACPClient) SetSessionModel(ctx context.Context, sessionID, model string) error {
-	_, err := c.conn.SetSessionModel(ctx, acp.SetSessionModelRequest{
+	_, err := c.conn.UnstableSetSessionModel(ctx, acp.UnstableSetSessionModelRequest{
 		SessionId: acp.SessionId(sessionID),
-		Model:     acp.ModelId(model),
+		ModelId:   acp.UnstableModelId(model),
 	})
 	return err
 }

@@ -3,7 +3,7 @@ module github.com/normahq/codex-acp-bridge
 go 1.25.5
 
 require (
-	github.com/coder/acp-go-sdk v0.6.3
+	github.com/coder/acp-go-sdk v0.12.0
 	github.com/rs/zerolog v1.34.0
 	github.com/spf13/cobra v1.10.2
 )

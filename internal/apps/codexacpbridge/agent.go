@@ -166,6 +166,10 @@ func (a *codexACPProxyAgent) Cancel(ctx context.Context, params acp.CancelNotifi
 	return nil
 }
 
+func (a *codexACPProxyAgent) ListSessions(_ context.Context, _ acp.ListSessionsRequest) (acp.ListSessionsResponse, error) {
+	return acp.ListSessionsResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionList)
+}
+
 func (a *codexACPProxyAgent) NewSession(ctx context.Context, params acp.NewSessionRequest) (acp.NewSessionResponse, error) {
 	requestedSessionID, sessionConfig, err := sessionConfigFromNewSessionMeta(params.Meta, a.defaultConfig)
 	if err != nil {
@@ -359,6 +363,13 @@ func (a *codexACPProxyAgent) Prompt(ctx context.Context, params acp.PromptReques
 	}
 }
 
+func (a *codexACPProxyAgent) SetSessionConfigOption(
+	_ context.Context,
+	_ acp.SetSessionConfigOptionRequest,
+) (acp.SetSessionConfigOptionResponse, error) {
+	return acp.SetSessionConfigOptionResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionSetConfigOption)
+}
+
 func (a *codexACPProxyAgent) SetSessionMode(_ context.Context, params acp.SetSessionModeRequest) (acp.SetSessionModeResponse, error) {
 	nextMode := strings.TrimSpace(string(params.ModeId))
 	a.mu.Lock()
@@ -374,19 +385,22 @@ func (a *codexACPProxyAgent) SetSessionMode(_ context.Context, params acp.SetSes
 	return acp.SetSessionModeResponse{}, nil
 }
 
-func (a *codexACPProxyAgent) SetSessionModel(_ context.Context, params acp.SetSessionModelRequest) (acp.SetSessionModelResponse, error) {
+func (a *codexACPProxyAgent) UnstableSetSessionModel(
+	_ context.Context,
+	params acp.UnstableSetSessionModelRequest,
+) (acp.UnstableSetSessionModelResponse, error) {
 	nextModel := strings.TrimSpace(string(params.ModelId))
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	state, ok := a.sessions[params.SessionId]
 	if !ok {
-		return acp.SetSessionModelResponse{}, acp.NewInvalidParams("session not found")
+		return acp.UnstableSetSessionModelResponse{}, acp.NewInvalidParams("session not found")
 	}
 	if state.done != nil {
-		return acp.SetSessionModelResponse{}, acp.NewInvalidRequest("cannot update session model while prompt is active")
+		return acp.UnstableSetSessionModelResponse{}, acp.NewInvalidRequest("cannot update session model while prompt is active")
 	}
 	state.model = nextModel
-	return acp.SetSessionModelResponse{}, nil
+	return acp.UnstableSetSessionModelResponse{}, nil
 }
 
 func (a *codexACPProxyAgent) ensureSessionBackend(ctx context.Context, sessionID acp.SessionId) error {
@@ -1245,7 +1259,7 @@ func (a *codexACPProxyAgent) requestDecision(
 
 	req := acp.RequestPermissionRequest{
 		SessionId: sessionID,
-		ToolCall: acp.RequestPermissionToolCall{
+		ToolCall: acp.ToolCallUpdate{
 			ToolCallId: permissionToolCallID(rawInput),
 			Title:      acp.Ptr(title),
 			Kind:       acp.Ptr(toolKind),

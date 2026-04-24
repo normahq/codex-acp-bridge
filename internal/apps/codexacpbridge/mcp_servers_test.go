@@ -25,7 +25,7 @@ func TestValidateMCPServersRejectsInvalidConfigurations(t *testing.T) {
 			servers: []acp.McpServer{
 				{
 					Stdio: &acp.McpServerStdio{Name: "docs", Command: "docs"},
-					Http:  &acp.McpServerHttp{Name: "docs", Url: "http://localhost"},
+					Http:  &acp.McpServerHttpInline{Name: "docs", Url: "http://localhost"},
 				},
 			},
 			wantErr: `mcp server "docs": exactly one transport is required`,
@@ -35,7 +35,7 @@ func TestValidateMCPServersRejectsInvalidConfigurations(t *testing.T) {
 			servers: []acp.McpServer{
 				{
 					Stdio: &acp.McpServerStdio{Command: "docs"},
-					Http:  &acp.McpServerHttp{Url: "http://localhost"},
+					Http:  &acp.McpServerHttpInline{Url: "http://localhost"},
 				},
 			},
 			wantErr: `mcp server "<unnamed>": exactly one transport is required`,
@@ -44,7 +44,7 @@ func TestValidateMCPServersRejectsInvalidConfigurations(t *testing.T) {
 			name: "sse not supported",
 			servers: []acp.McpServer{
 				{
-					Sse: &acp.McpServerSse{Name: "events", Url: "http://localhost/sse"},
+					Sse: &acp.McpServerSseInline{Name: "events", Url: "http://localhost/sse"},
 				},
 			},
 			wantErr: `transport 'sse' is not supported`,
@@ -56,7 +56,7 @@ func TestValidateMCPServersRejectsInvalidConfigurations(t *testing.T) {
 					Stdio: &acp.McpServerStdio{Name: "docs", Command: "docs"},
 				},
 				{
-					Http: &acp.McpServerHttp{Name: "docs", Url: "http://localhost"},
+					Http: &acp.McpServerHttpInline{Name: "docs", Url: "http://localhost"},
 				},
 			},
 			wantErr: `mcp server with name "docs" is duplicated`,
@@ -87,7 +87,7 @@ func TestValidateMCPServersAcceptsStdioAndHTTP(t *testing.T) {
 			},
 		},
 		{
-			Http: &acp.McpServerHttp{
+			Http: &acp.McpServerHttpInline{
 				Name: "api",
 				Url:  "https://example.test/mcp",
 			},
