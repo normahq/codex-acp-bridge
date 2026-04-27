@@ -71,10 +71,11 @@ type codexProxySessionState struct {
 
 	workerCancel context.CancelFunc
 
-	planDeltaByItem  map[string]string
-	pendingRequests  map[string]string
-	latestRateLimits map[string]any
-	latestUsage      map[string]any
+	agentMessageDeltaByItem map[string]string
+	planDeltaByItem         map[string]string
+	pendingRequests         map[string]string
+	latestRateLimits        map[string]any
+	latestUsage             map[string]any
 }
 
 type sessionMCPStartup struct {
@@ -318,6 +319,7 @@ func (a *codexACPProxyAgent) Prompt(ctx context.Context, params acp.PromptReques
 	a.mu.Lock()
 	if current := a.sessions[params.SessionId]; current != nil {
 		current.turnID = turnID
+		current.agentMessageDeltaByItem = make(map[string]string)
 		current.planDeltaByItem = make(map[string]string)
 		current.pendingRequests = make(map[string]string)
 		current.latestUsage = nil
@@ -736,13 +738,12 @@ func (a *codexACPProxyAgent) handleNotification(
 		}
 		a.resetTurnState(sessionID)
 	case "item/agentMessage/delta":
+		itemID := stringValue(params, "itemId")
 		delta := rawStringValue(params, "delta")
-		if delta == "" {
+		if itemID == "" || delta == "" {
 			return false, "", nil, nil
 		}
-		if err := a.sendUpdate(ctx, sessionID, acp.UpdateAgentMessageText(delta)); err != nil {
-			return false, "", nil, err
-		}
+		a.appendAgentMessageDelta(sessionID, itemID, delta)
 	case "item/reasoning/textDelta", "item/reasoning/summaryTextDelta":
 		delta := rawStringValue(params, "delta")
 		if delta == "" {
@@ -805,6 +806,12 @@ func (a *codexACPProxyAgent) handleNotification(
 			return false, "", nil, nil
 		}
 		itemType := stringValue(item, "type")
+		if itemType == "agentMessage" {
+			if err := a.handleCompletedAgentMessage(ctx, sessionID, item); err != nil {
+				return false, "", nil, err
+			}
+			return false, "", nil, nil
+		}
 		if !isToolLifecycleItemType(itemType) {
 			return false, "", nil, nil
 		}
@@ -1802,10 +1809,60 @@ func (a *codexACPProxyAgent) resetTurnState(sessionID acp.SessionId) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if state := a.sessions[sessionID]; state != nil {
+		state.agentMessageDeltaByItem = make(map[string]string)
 		state.planDeltaByItem = make(map[string]string)
 		state.pendingRequests = make(map[string]string)
 		state.latestUsage = nil
 	}
+}
+
+func (a *codexACPProxyAgent) appendAgentMessageDelta(sessionID acp.SessionId, itemID string, delta string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	state := a.sessions[sessionID]
+	if state == nil {
+		return
+	}
+	if state.agentMessageDeltaByItem == nil {
+		state.agentMessageDeltaByItem = make(map[string]string)
+	}
+	state.agentMessageDeltaByItem[itemID] += delta
+}
+
+func (a *codexACPProxyAgent) agentMessageDelta(sessionID acp.SessionId, itemID string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	state := a.sessions[sessionID]
+	if state == nil || state.agentMessageDeltaByItem == nil {
+		return ""
+	}
+	return state.agentMessageDeltaByItem[itemID]
+}
+
+func (a *codexACPProxyAgent) handleCompletedAgentMessage(ctx context.Context, sessionID acp.SessionId, item map[string]any) error {
+	itemID := stringValue(item, "id")
+	phase := rawStringValue(item, "phase")
+	if phase == "commentary" {
+		return nil
+	}
+	if phase != "" && phase != "final_answer" {
+		if a.logger != nil {
+			a.logger.Debug().
+				Str("itemId", itemID).
+				Str("phase", phase).
+				Msg("skipping agent message with unsupported phase")
+		}
+		return nil
+	}
+
+	text := rawStringValue(item, "text")
+	if text == "" && itemID != "" {
+		text = a.agentMessageDelta(sessionID, itemID)
+	}
+	if text == "" {
+		return nil
+	}
+	return a.sendUpdate(ctx, sessionID, acp.UpdateAgentMessageText(text))
 }
 
 func (a *codexACPProxyAgent) appendPlanDelta(sessionID acp.SessionId, itemID string, delta string) string {

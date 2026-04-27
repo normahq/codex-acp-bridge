@@ -700,6 +700,16 @@ func TestPromptStreamsAppServerNotificationsToACPUpdates(t *testing.T) {
 		"itemId":   "item-msg-1",
 		"delta":    "done",
 	})
+	queueNotification(session, "item/completed", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"item": map[string]any{
+			"type":  "agentMessage",
+			"id":    "item-msg-1",
+			"text":  "Hi done",
+			"phase": "final_answer",
+		},
+	})
 	queueNotification(session, "turn/completed", map[string]any{
 		"threadId": "thr-1",
 		"turnId":   "turn-1",
@@ -735,11 +745,8 @@ func TestPromptStreamsAppServerNotificationsToACPUpdates(t *testing.T) {
 	if len(updates) == 0 {
 		t.Fatal("expected ACP session updates")
 	}
-	if !containsAgentMessageText(updates, "done") {
-		t.Fatalf("missing agent message delta in ACP updates: %#v", updates)
-	}
-	if !containsAgentMessageText(updates, " ") {
-		t.Fatalf("missing whitespace-only agent message delta in ACP updates: %#v", updates)
+	if !containsAgentMessageText(updates, "Hi done") {
+		t.Fatalf("missing completed agent message in ACP updates: %#v", updates)
 	}
 	if !containsToolCallText(updates, "  ok   ./...") {
 		t.Fatalf("missing tool call output delta with leading spaces in ACP updates: %#v", updates)
@@ -818,6 +825,223 @@ func TestPromptDoesNotProjectNonToolItemLifecycleAsToolCalls(t *testing.T) {
 	}
 	if countThoughtText(updates, "thinking") != 1 {
 		t.Fatalf("missing reasoning text delta thought update: %#v", updates)
+	}
+}
+
+func TestPromptSuppressesCommentaryAgentMessage(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	queueNotification(session, "item/agentMessage/delta", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"itemId":   "item-msg-1",
+		"delta":    "working",
+	})
+	queueNotification(session, "item/completed", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"item": map[string]any{
+			"type":  "agentMessage",
+			"id":    "item-msg-1",
+			"text":  "working",
+			"phase": "commentary",
+		},
+	})
+	queueNotification(session, "turn/completed", map[string]any{
+		"threadId": "thr-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "completed",
+		},
+	})
+
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	}); err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+
+	updates := conn.sessionUpdates(newResp.SessionId)
+	if countAgentMessageChunks(updates) != 0 {
+		t.Fatalf("unexpected agent message chunks for commentary: %#v", updates)
+	}
+	if countThoughtChunks(updates) != 0 {
+		t.Fatalf("unexpected thought chunks for commentary: %#v", updates)
+	}
+}
+
+func TestPromptForwardsCompletedAgentMessageForVisiblePhases(t *testing.T) {
+	tests := []struct {
+		name     string
+		hasPhase bool
+		phase    any
+	}{
+		{name: "final answer", hasPhase: true, phase: "final_answer"},
+		{name: "null phase", hasPhase: true, phase: nil},
+		{name: "empty phase", hasPhase: true, phase: ""},
+		{name: "missing phase"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+			item := map[string]any{
+				"type": "agentMessage",
+				"id":   "item-msg-1",
+				"text": "visible answer",
+			}
+			if tt.hasPhase {
+				item["phase"] = tt.phase
+			}
+			queueNotification(session, "item/completed", map[string]any{
+				"threadId": "thr-1",
+				"turnId":   "turn-1",
+				"item":     item,
+			})
+			queueNotification(session, "turn/completed", map[string]any{
+				"threadId": "thr-1",
+				"turn": map[string]any{
+					"id":     "turn-1",
+					"status": "completed",
+				},
+			})
+
+			conn := &fakeACPAppConnection{}
+			l := zerolog.Nop()
+			agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+				return session, nil
+			}, "agent", codexAppConfig{}, &l)
+			agent.setConnection(conn)
+
+			newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+			if err != nil {
+				t.Fatalf("NewSession() error = %v", err)
+			}
+			if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
+				SessionId: newResp.SessionId,
+				Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+			}); err != nil {
+				t.Fatalf("Prompt() error = %v", err)
+			}
+
+			updates := conn.sessionUpdates(newResp.SessionId)
+			if !containsAgentMessageText(updates, "visible answer") {
+				t.Fatalf("missing visible agent message: %#v", updates)
+			}
+			if countThoughtChunks(updates) != 0 {
+				t.Fatalf("unexpected thought chunks for visible agent message: %#v", updates)
+			}
+		})
+	}
+}
+
+func TestPromptPrefersCompletedAgentMessageTextOverBufferedDeltas(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	queueNotification(session, "item/agentMessage/delta", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"itemId":   "item-msg-1",
+		"delta":    "draft",
+	})
+	queueNotification(session, "item/completed", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"item": map[string]any{
+			"type":  "agentMessage",
+			"id":    "item-msg-1",
+			"text":  "final",
+			"phase": "final_answer",
+		},
+	})
+	queueNotification(session, "turn/completed", map[string]any{
+		"threadId": "thr-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "completed",
+		},
+	})
+
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	}); err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+
+	updates := conn.sessionUpdates(newResp.SessionId)
+	if !containsAgentMessageText(updates, "final") {
+		t.Fatalf("missing completed agent message text: %#v", updates)
+	}
+	if containsAgentMessageText(updates, "draft") {
+		t.Fatalf("unexpected buffered draft agent message text: %#v", updates)
+	}
+}
+
+func TestCompletedFinalAnswerDoesNotCompletePrompt(t *testing.T) {
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return nil, nil
+	}, "agent", codexAppConfig{}, &l)
+	agent.setConnection(conn)
+	sessionID := acp.SessionId("session-phase")
+	agent.mu.Lock()
+	agent.sessions[sessionID] = &codexProxySessionState{}
+	agent.mu.Unlock()
+
+	raw, err := json.Marshal(map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"item": map[string]any{
+			"type":  "agentMessage",
+			"id":    "item-msg-1",
+			"text":  "done",
+			"phase": "final_answer",
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal params: %v", err)
+	}
+	done, stopReason, usage, err := agent.handleNotification(context.Background(), sessionID, "thr-1", "turn-1", true, &appServerNotification{
+		Method: "item/completed",
+		Params: raw,
+	})
+	if err != nil {
+		t.Fatalf("handleNotification() error = %v", err)
+	}
+	if done {
+		t.Fatalf("handleNotification() done = %v, want false", done)
+	}
+	if stopReason != "" {
+		t.Fatalf("handleNotification() stopReason = %q, want empty", stopReason)
+	}
+	if usage != nil {
+		t.Fatalf("handleNotification() usage = %#v, want nil", usage)
+	}
+	if !containsAgentMessageText(conn.sessionUpdates(sessionID), "done") {
+		t.Fatalf("missing final answer agent message update: %#v", conn.sessionUpdates(sessionID))
 	}
 }
 
@@ -1460,6 +1684,16 @@ func TestPromptRebindsTurnIDFromTurnStartedNotification(t *testing.T) {
 		"turnId":   "turn-2",
 		"itemId":   "item-msg-1",
 		"delta":    "rebound",
+	})
+	queueNotification(session, "item/completed", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-2",
+		"item": map[string]any{
+			"type":  "agentMessage",
+			"id":    "item-msg-1",
+			"text":  "rebound",
+			"phase": "final_answer",
+		},
 	})
 	queueNotification(session, "turn/completed", map[string]any{
 		"threadId": "thr-1",
@@ -2228,6 +2462,16 @@ func containsAgentMessageText(updates []acp.SessionNotification, text string) bo
 		}
 	}
 	return false
+}
+
+func countAgentMessageChunks(updates []acp.SessionNotification) int {
+	count := 0
+	for _, update := range updates {
+		if update.Update.AgentMessageChunk != nil {
+			count++
+		}
+	}
+	return count
 }
 
 func containsPlanEntry(updates []acp.SessionNotification, step string) bool {
