@@ -66,6 +66,7 @@ npx -y @normahq/codex-acp-bridge@latest
 - Exposes Codex app-server as ACP over stdio.
 - Populates ACP `session/new.models` from `model/list`.
 - Supports ACP `session/set_model` and `session/set_mode`.
+- Supports ACP `session/new.configOptions` and `session/set_config_option` for model-advertised reasoning effort values.
 - Supports text and image prompt blocks.
 - Supports per-session MCP servers from ACP `mcpServers` (`stdio`, `http`; rejects `sse`) using merge contract (same-name overrides, other configured servers remain active).
 - Supports strict session metadata mapping via `session/new._meta.codex`.

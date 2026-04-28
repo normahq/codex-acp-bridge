@@ -79,7 +79,7 @@ func buildThreadStartParams(cwd string, cfg codexAppConfig, sessionModel string,
 	return params
 }
 
-func buildTurnStartParams(threadID string, prompt []acp.ContentBlock, model string) (map[string]any, error) {
+func buildTurnStartParams(threadID string, prompt []acp.ContentBlock, model string, reasoningEffort string) (map[string]any, error) {
 	inputItems, err := buildTurnInputItems(prompt)
 	if err != nil {
 		return nil, err
@@ -94,6 +94,9 @@ func buildTurnStartParams(threadID string, prompt []acp.ContentBlock, model stri
 	}
 	if trimmedModel := strings.TrimSpace(model); trimmedModel != "" {
 		params["model"] = trimmedModel
+	}
+	if trimmedReasoningEffort := strings.TrimSpace(reasoningEffort); trimmedReasoningEffort != "" {
+		params["effort"] = trimmedReasoningEffort
 	}
 	return params, nil
 }

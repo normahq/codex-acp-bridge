@@ -26,6 +26,15 @@ const (
 	decisionAbort            = "abort"
 	mcpContractMerge         = "merge"
 	methodTurnStarted        = "turn/started"
+
+	sessionConfigIDReasoningEffort       = "reasoning_effort"
+	sessionConfigCategoryThoughtLevel    = "thought_level"
+	sessionConfigNameReasoningEffort     = "Reasoning Effort"
+	sessionConfigTypeSelect              = "select"
+	sessionConfigTypeBoolean             = "boolean"
+	sessionConfigOptionValueUnsupported  = "session config option value is not supported"
+	sessionConfigOptionIDUnsupported     = "session config option is not supported"
+	sessionConfigOptionReasoningRequired = "reasoning effort must be a string value"
 )
 
 type codexACPConnection interface {
@@ -56,14 +65,15 @@ type promptCompletion struct {
 }
 
 type codexProxySessionState struct {
-	cwd        string
-	config     codexAppConfig
-	threadID   string
-	turnID     string
-	model      string
-	mode       string
-	mcpServers map[string]acp.McpServer
-	mcpStartup map[string]sessionMCPStartup
+	cwd             string
+	config          codexAppConfig
+	threadID        string
+	turnID          string
+	model           string
+	mode            string
+	reasoningEffort string
+	mcpServers      map[string]acp.McpServer
+	mcpStartup      map[string]sessionMCPStartup
 
 	backend appServerSession
 	cancel  context.CancelFunc
@@ -230,14 +240,17 @@ func (a *codexACPProxyAgent) NewSession(ctx context.Context, params acp.NewSessi
 	}
 
 	resp := acp.NewSessionResponse{SessionId: sessionID}
-	modelState, err := a.buildSessionModelState(ctx, sessionID)
+	modelState, configOptions, err := a.buildSessionModelConfigState(ctx, sessionID)
 	if err != nil {
 		a.logger.Warn().
 			Err(err).
 			Str("session_id", string(sessionID)).
-			Msg("model/list unavailable; continuing without session models")
+			Msg("model/list unavailable; continuing without session model config")
 	} else if modelState != nil {
 		resp.Models = modelState
+		if len(configOptions) > 0 {
+			resp.ConfigOptions = configOptions
+		}
 	}
 	if mcpMeta := a.sessionMCPMeta(sessionID, false); len(mcpMeta) > 0 {
 		resp.Meta = map[string]any{
@@ -277,6 +290,7 @@ func (a *codexACPProxyAgent) Prompt(ctx context.Context, params acp.PromptReques
 	backend := state.backend
 	threadID := state.threadID
 	model := state.model
+	reasoningEffort := state.reasoningEffort
 	doneCh := state.done
 	var workerCtx context.Context
 	if state.workerCancel == nil {
@@ -285,7 +299,7 @@ func (a *codexACPProxyAgent) Prompt(ctx context.Context, params acp.PromptReques
 	startWorker := workerCtx != nil
 	a.mu.Unlock()
 
-	turnStartParams, err := buildTurnStartParams(threadID, params.Prompt, model)
+	turnStartParams, err := buildTurnStartParams(threadID, params.Prompt, model, reasoningEffort)
 	if err != nil {
 		return acp.PromptResponse{}, acp.NewInvalidParams(err.Error())
 	}
@@ -366,10 +380,29 @@ func (a *codexACPProxyAgent) Prompt(ctx context.Context, params acp.PromptReques
 }
 
 func (a *codexACPProxyAgent) SetSessionConfigOption(
-	_ context.Context,
-	_ acp.SetSessionConfigOptionRequest,
+	ctx context.Context,
+	params acp.SetSessionConfigOptionRequest,
 ) (acp.SetSessionConfigOptionResponse, error) {
-	return acp.SetSessionConfigOptionResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionSetConfigOption)
+	req := params.ValueId
+	if req == nil {
+		if params.Boolean != nil && strings.TrimSpace(string(params.Boolean.ConfigId)) != sessionConfigIDReasoningEffort {
+			return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(sessionConfigOptionIDUnsupported)
+		}
+		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(sessionConfigOptionReasoningRequired)
+	}
+	if strings.TrimSpace(string(req.ConfigId)) != sessionConfigIDReasoningEffort {
+		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(sessionConfigOptionIDUnsupported)
+	}
+	nextEffort := strings.TrimSpace(string(req.Value))
+	if nextEffort == "" {
+		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(sessionConfigOptionValueUnsupported)
+	}
+
+	configOptions, err := a.setSessionReasoningEffort(ctx, req.SessionId, nextEffort)
+	if err != nil {
+		return acp.SetSessionConfigOptionResponse{}, err
+	}
+	return acp.SetSessionConfigOptionResponse{ConfigOptions: configOptions}, nil
 }
 
 func (a *codexACPProxyAgent) SetSessionMode(_ context.Context, params acp.SetSessionModeRequest) (acp.SetSessionModeResponse, error) {
@@ -388,20 +421,38 @@ func (a *codexACPProxyAgent) SetSessionMode(_ context.Context, params acp.SetSes
 }
 
 func (a *codexACPProxyAgent) UnstableSetSessionModel(
-	_ context.Context,
+	ctx context.Context,
 	params acp.UnstableSetSessionModelRequest,
 ) (acp.UnstableSetSessionModelResponse, error) {
 	nextModel := strings.TrimSpace(string(params.ModelId))
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	state, ok := a.sessions[params.SessionId]
 	if !ok {
+		a.mu.Unlock()
 		return acp.UnstableSetSessionModelResponse{}, acp.NewInvalidParams("session not found")
 	}
 	if state.done != nil {
+		a.mu.Unlock()
 		return acp.UnstableSetSessionModelResponse{}, acp.NewInvalidRequest("cannot update session model while prompt is active")
 	}
 	state.model = nextModel
+	a.mu.Unlock()
+
+	_, configOptions, err := a.buildSessionModelConfigState(ctx, params.SessionId)
+	if err != nil {
+		a.logger.Warn().
+			Err(err).
+			Str("session_id", string(params.SessionId)).
+			Msg("model/list unavailable; continuing without session config option update")
+		return acp.UnstableSetSessionModelResponse{}, nil
+	}
+	if len(configOptions) > 0 {
+		_ = a.sendUpdate(ctx, params.SessionId, acp.SessionUpdate{
+			ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{
+				ConfigOptions: configOptions,
+			},
+		})
+	}
 	return acp.UnstableSetSessionModelResponse{}, nil
 }
 
@@ -480,38 +531,47 @@ func (a *codexACPProxyAgent) ensureSessionThread(ctx context.Context, sessionID 
 	if strings.TrimSpace(state.model) == "" {
 		state.model = strings.TrimSpace(startResp.Model)
 	}
+	if startResp.ReasoningEffort != nil {
+		state.reasoningEffort = strings.TrimSpace(*startResp.ReasoningEffort)
+	}
 	return nil
 }
 
-func (a *codexACPProxyAgent) buildSessionModelState(ctx context.Context, sessionID acp.SessionId) (*acp.SessionModelState, error) {
+func (a *codexACPProxyAgent) buildSessionModelConfigState(
+	ctx context.Context,
+	sessionID acp.SessionId,
+) (*acp.SessionModelState, []acp.SessionConfigOption, error) {
 	a.mu.Lock()
 	state, ok := a.sessions[sessionID]
 	if !ok {
 		a.mu.Unlock()
-		return nil, acp.NewInvalidParams("session not found")
+		return nil, nil, acp.NewInvalidParams("session not found")
 	}
 	backend := state.backend
 	currentModelID := strings.TrimSpace(state.model)
+	currentReasoningEffort := strings.TrimSpace(state.reasoningEffort)
 	a.mu.Unlock()
 	if backend == nil {
-		return nil, errors.New("session backend unavailable")
+		return nil, nil, errors.New("session backend unavailable")
 	}
 
 	models, err := listAppServerModels(ctx, backend)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(models) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	availableModels := make([]acp.ModelInfo, 0, len(models))
 	defaultModelID := ""
+	modelByID := make(map[string]appServerModel, len(models))
 	for _, model := range models {
 		modelID := strings.TrimSpace(model.ID)
 		if modelID == "" {
 			continue
 		}
+		modelByID[modelID] = model
 		modelName := strings.TrimSpace(model.DisplayName)
 		if modelName == "" {
 			modelName = modelID
@@ -533,7 +593,7 @@ func (a *codexACPProxyAgent) buildSessionModelState(ctx context.Context, session
 		}
 	}
 	if len(availableModels) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	if currentModelID == "" {
@@ -543,10 +603,177 @@ func (a *codexACPProxyAgent) buildSessionModelState(ctx context.Context, session
 		}
 	}
 
+	var configOptions []acp.SessionConfigOption
+	selectedModel, hasSelectedModel := modelByID[currentModelID]
+	if hasSelectedModel {
+		if option, selectedEffort, ok := reasoningEffortConfigOption(selectedModel, currentReasoningEffort, ""); ok {
+			configOptions = []acp.SessionConfigOption{option}
+			a.mu.Lock()
+			if state := a.sessions[sessionID]; state != nil {
+				if strings.TrimSpace(state.model) == "" {
+					state.model = currentModelID
+				}
+				state.reasoningEffort = selectedEffort
+			}
+			a.mu.Unlock()
+		}
+	}
+
 	return &acp.SessionModelState{
 		CurrentModelId:  acp.ModelId(currentModelID),
 		AvailableModels: availableModels,
-	}, nil
+	}, configOptions, nil
+}
+
+func (a *codexACPProxyAgent) setSessionReasoningEffort(
+	ctx context.Context,
+	sessionID acp.SessionId,
+	nextEffort string,
+) ([]acp.SessionConfigOption, error) {
+	a.mu.Lock()
+	state, ok := a.sessions[sessionID]
+	if !ok {
+		a.mu.Unlock()
+		return nil, acp.NewInvalidParams("session not found")
+	}
+	backend := state.backend
+	currentModelID := strings.TrimSpace(state.model)
+	a.mu.Unlock()
+	if backend == nil {
+		return nil, errors.New("session backend unavailable")
+	}
+
+	models, err := listAppServerModels(ctx, backend)
+	if err != nil {
+		return nil, err
+	}
+	model, ok := selectAppServerModel(models, currentModelID)
+	if !ok {
+		return nil, acp.NewInvalidParams(sessionConfigOptionIDUnsupported)
+	}
+	option, selectedEffort, ok := reasoningEffortConfigOption(model, "", nextEffort)
+	if !ok {
+		return nil, acp.NewInvalidParams(sessionConfigOptionIDUnsupported)
+	}
+	if selectedEffort != strings.TrimSpace(nextEffort) {
+		return nil, acp.NewInvalidParams(sessionConfigOptionValueUnsupported)
+	}
+
+	a.mu.Lock()
+	if state := a.sessions[sessionID]; state != nil {
+		state.reasoningEffort = selectedEffort
+		if strings.TrimSpace(state.model) == "" {
+			state.model = strings.TrimSpace(model.ID)
+		}
+	}
+	a.mu.Unlock()
+	return []acp.SessionConfigOption{option}, nil
+}
+
+func selectAppServerModel(models []appServerModel, modelID string) (appServerModel, bool) {
+	trimmedModelID := strings.TrimSpace(modelID)
+	if trimmedModelID != "" {
+		for _, model := range models {
+			if strings.TrimSpace(model.ID) == trimmedModelID {
+				return model, true
+			}
+		}
+	}
+	for _, model := range models {
+		if model.IsDefault && strings.TrimSpace(model.ID) != "" {
+			return model, true
+		}
+	}
+	for _, model := range models {
+		if strings.TrimSpace(model.ID) != "" {
+			return model, true
+		}
+	}
+	return appServerModel{}, false
+}
+
+func reasoningEffortConfigOption(
+	model appServerModel,
+	currentEffort string,
+	requestedEffort string,
+) (acp.SessionConfigOption, string, bool) {
+	options := make(acp.SessionConfigSelectOptionsUngrouped, 0, len(model.SupportedReasoningEfforts))
+	seen := make(map[string]struct{}, len(model.SupportedReasoningEfforts))
+	for _, effortOption := range model.SupportedReasoningEfforts {
+		effort := strings.TrimSpace(effortOption.ReasoningEffort)
+		if effort == "" {
+			continue
+		}
+		if _, ok := seen[effort]; ok {
+			continue
+		}
+		seen[effort] = struct{}{}
+		option := acp.SessionConfigSelectOption{
+			Name:  reasoningEffortName(effort),
+			Value: acp.SessionConfigValueId(effort),
+		}
+		if description := strings.TrimSpace(effortOption.Description); description != "" {
+			option.Description = &description
+		}
+		options = append(options, option)
+	}
+	if len(options) == 0 {
+		return acp.SessionConfigOption{}, "", false
+	}
+
+	selectedEffort := chooseReasoningEffort(model, seen, currentEffort, requestedEffort)
+	if selectedEffort == "" {
+		return acp.SessionConfigOption{}, "", false
+	}
+	category := acp.SessionConfigOptionCategoryOther(sessionConfigCategoryThoughtLevel)
+	return acp.SessionConfigOption{
+		Select: &acp.SessionConfigOptionSelect{
+			Type:         sessionConfigTypeSelect,
+			Id:           acp.SessionConfigId(sessionConfigIDReasoningEffort),
+			Name:         sessionConfigNameReasoningEffort,
+			Category:     &acp.SessionConfigOptionCategory{Other: &category},
+			CurrentValue: acp.SessionConfigValueId(selectedEffort),
+			Options:      acp.SessionConfigSelectOptions{Ungrouped: &options},
+		},
+	}, selectedEffort, true
+}
+
+func chooseReasoningEffort(
+	model appServerModel,
+	supported map[string]struct{},
+	currentEffort string,
+	requestedEffort string,
+) string {
+	for _, candidate := range []string{
+		strings.TrimSpace(requestedEffort),
+		strings.TrimSpace(currentEffort),
+		strings.TrimSpace(model.DefaultReasoningEffort),
+	} {
+		if candidate == "" {
+			continue
+		}
+		if _, ok := supported[candidate]; ok {
+			return candidate
+		}
+	}
+	for _, effortOption := range model.SupportedReasoningEfforts {
+		effort := strings.TrimSpace(effortOption.ReasoningEffort)
+		if effort == "" {
+			continue
+		}
+		if _, ok := supported[effort]; ok {
+			return effort
+		}
+	}
+	return ""
+}
+
+func reasoningEffortName(effort string) string {
+	trimmed := strings.TrimSpace(effort)
+	if trimmed == "" {
+		return ""
+	}
+	return strings.ToUpper(trimmed[:1]) + trimmed[1:]
 }
 
 func listAppServerModels(ctx context.Context, backend appServerSession) ([]appServerModel, error) {

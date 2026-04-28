@@ -15,7 +15,7 @@ func TestBuildTurnStartParamsImageDataURLFallback(t *testing.T) {
 				Data:     "QUJDRA==",
 			},
 		},
-	}, "gpt-5.4")
+	}, "gpt-5.4", testReasoningXHigh)
 	if err != nil {
 		t.Fatalf("buildTurnStartParams() error = %v", err)
 	}
@@ -25,6 +25,9 @@ func TestBuildTurnStartParamsImageDataURLFallback(t *testing.T) {
 	}
 	if got := stringValue(params, "model"); got != "gpt-5.4" {
 		t.Fatalf("model = %q, want %q", got, "gpt-5.4")
+	}
+	if got := stringValue(params, "effort"); got != testReasoningXHigh {
+		t.Fatalf("effort = %q, want %q", got, testReasoningXHigh)
 	}
 	input := listValue(params, "input")
 	if len(input) != 1 {
@@ -47,7 +50,7 @@ func TestBuildTurnStartParamsRejectsUnsupportedResourceLink(t *testing.T) {
 				Uri:  "file:///tmp/repo",
 			},
 		},
-	}, "")
+	}, "", "")
 	if err == nil {
 		t.Fatal("buildTurnStartParams() error = nil, want unsupported resource_link error")
 	}

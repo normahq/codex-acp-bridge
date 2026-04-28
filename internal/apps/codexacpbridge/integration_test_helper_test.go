@@ -210,11 +210,11 @@ func (c *integrationACPClient) CreateTerminal(_ context.Context, _ acp.CreateTer
 	return acp.CreateTerminalResponse{}, errors.New("createTerminal is not supported in integration helper")
 }
 
-func (c *integrationACPClient) KillTerminalCommand(
+func (c *integrationACPClient) KillTerminal(
 	_ context.Context,
-	_ acp.KillTerminalCommandRequest,
-) (acp.KillTerminalCommandResponse, error) {
-	return acp.KillTerminalCommandResponse{}, errors.New("killTerminalCommand is not supported in integration helper")
+	_ acp.KillTerminalRequest,
+) (acp.KillTerminalResponse, error) {
+	return acp.KillTerminalResponse{}, errors.New("killTerminal is not supported in integration helper")
 }
 
 func (c *integrationACPClient) TerminalOutput(_ context.Context, _ acp.TerminalOutputRequest) (acp.TerminalOutputResponse, error) {

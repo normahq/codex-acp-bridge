@@ -20,6 +20,7 @@ const (
 	testApprovalsReviewerGuard = "guardian_subagent"
 	testMCPTransportStdio      = "stdio"
 	testPersonalityPragmatic   = "pragmatic"
+	testReasoningXHigh         = "xhigh"
 	testServiceTierFlex        = "flex"
 )
 
@@ -135,11 +136,12 @@ func TestNewSessionAppliesCodexMetaOverridesToThreadStart(t *testing.T) {
 				"serviceTier":           testServiceTierFlex,
 				"ephemeral":             true,
 				"config": map[string]any{
-					"shared":         "meta",
-					"x":              "y",
-					"profile":        "from-meta-config-profile",
-					"compact_prompt": "from-meta-config-compact",
-					"mcp_servers":    "from-meta-config-mcp",
+					"shared":                 "meta",
+					"x":                      "y",
+					"profile":                "from-meta-config-profile",
+					"compact_prompt":         "from-meta-config-compact",
+					"mcp_servers":            "from-meta-config-mcp",
+					"model_reasoning_effort": testReasoningXHigh,
 				},
 			},
 		},
@@ -225,6 +227,9 @@ func TestNewSessionAppliesCodexMetaOverridesToThreadStart(t *testing.T) {
 	}
 	if got := stringValue(config, "x"); got != "y" {
 		t.Fatalf("config.x = %q, want %q", got, "y")
+	}
+	if got := stringValue(config, "model_reasoning_effort"); got != testReasoningXHigh {
+		t.Fatalf("config.model_reasoning_effort = %q, want xhigh", got)
 	}
 
 	mcpServersCfg := mapValue(config, "mcp_servers")
@@ -484,6 +489,172 @@ func TestNewSessionIncludesModelsFromModelList(t *testing.T) {
 	}
 	if got := string(resp.Models.AvailableModels[0].ModelId); got != "gpt-5.4" {
 		t.Fatalf("available models[0].modelId = %q, want %q", got, "gpt-5.4")
+	}
+}
+
+func TestNewSessionIncludesReasoningEffortConfigOptionsFromModelList(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	session.modelListResponses = []appServerModelListResponse{
+		{
+			Data: []appServerModel{
+				appServerModelWithReasoning("gpt-5.4", true, testReasoningXHigh, "minimal", "low", "medium", "high", testReasoningXHigh),
+			},
+		},
+	}
+
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+	agent.setConnection(conn)
+
+	resp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	option := requireReasoningEffortOption(t, resp.ConfigOptions)
+	if got := option.CurrentValue; got != acp.SessionConfigValueId(testReasoningXHigh) {
+		t.Fatalf("reasoning current value = %q, want xhigh", got)
+	}
+	if option.Category == nil || option.Category.Other == nil || *option.Category.Other != sessionConfigCategoryThoughtLevel {
+		t.Fatalf("reasoning category = %#v, want %q", option.Category, sessionConfigCategoryThoughtLevel)
+	}
+	if !reasoningEffortOptionsInclude(option, testReasoningXHigh) {
+		t.Fatalf("reasoning options missing xhigh: %#v", option.Options)
+	}
+}
+
+func TestSetSessionConfigOptionReasoningEffortAppliesToNextTurn(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	session.modelListResponses = []appServerModelListResponse{
+		{
+			Data: []appServerModel{
+				appServerModelWithReasoning("gpt-5.4", true, "medium", "low", "medium", "high", testReasoningXHigh),
+			},
+		},
+		{
+			Data: []appServerModel{
+				appServerModelWithReasoning("gpt-5.4", true, "medium", "low", "medium", "high", testReasoningXHigh),
+			},
+		},
+	}
+	queueNotification(session, "turn/completed", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "completed",
+		},
+	})
+
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	setResp, err := agent.SetSessionConfigOption(context.Background(), acp.SetSessionConfigOptionRequest{
+		ValueId: &acp.SetSessionConfigOptionValueId{
+			SessionId: newResp.SessionId,
+			ConfigId:  acp.SessionConfigId(sessionConfigIDReasoningEffort),
+			Value:     acp.SessionConfigValueId(testReasoningXHigh),
+		},
+	})
+	if err != nil {
+		t.Fatalf("SetSessionConfigOption() error = %v", err)
+	}
+	option := requireReasoningEffortOption(t, setResp.ConfigOptions)
+	if got := option.CurrentValue; got != acp.SessionConfigValueId(testReasoningXHigh) {
+		t.Fatalf("reasoning current value = %q, want xhigh", got)
+	}
+
+	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	}); err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+	turnStartParams := session.turnStartParamsSnapshot()
+	if len(turnStartParams) != 1 {
+		t.Fatalf("turn/start calls = %d, want 1", len(turnStartParams))
+	}
+	if got := stringValue(turnStartParams[0], "effort"); got != testReasoningXHigh {
+		t.Fatalf("turn/start effort = %q, want xhigh", got)
+	}
+}
+
+func TestSetSessionConfigOptionRejectsUnsupportedReasoningEffort(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	session.modelListResponses = []appServerModelListResponse{
+		{
+			Data: []appServerModel{
+				appServerModelWithReasoning("gpt-5.4", true, "medium", "low", "medium", "high"),
+			},
+		},
+		{
+			Data: []appServerModel{
+				appServerModelWithReasoning("gpt-5.4", true, "medium", "low", "medium", "high"),
+			},
+		},
+	}
+
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	_, err = agent.SetSessionConfigOption(context.Background(), acp.SetSessionConfigOptionRequest{
+		ValueId: &acp.SetSessionConfigOptionValueId{
+			SessionId: newResp.SessionId,
+			ConfigId:  acp.SessionConfigId(sessionConfigIDReasoningEffort),
+			Value:     acp.SessionConfigValueId(testReasoningXHigh),
+		},
+	})
+	if err == nil {
+		t.Fatal("SetSessionConfigOption() error = nil, want unsupported value error")
+	}
+	if !strings.Contains(err.Error(), sessionConfigOptionValueUnsupported) {
+		t.Fatalf("SetSessionConfigOption() error = %v, want unsupported value", err)
+	}
+}
+
+func TestSetSessionConfigOptionRejectsUnknownConfigID(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	_, err = agent.SetSessionConfigOption(context.Background(), acp.SetSessionConfigOptionRequest{
+		ValueId: &acp.SetSessionConfigOptionValueId{
+			SessionId: newResp.SessionId,
+			ConfigId:  acp.SessionConfigId("unknown"),
+			Value:     acp.SessionConfigValueId(testReasoningXHigh),
+		},
+	})
+	if err == nil {
+		t.Fatal("SetSessionConfigOption() error = nil, want unsupported config error")
+	}
+	if !strings.Contains(err.Error(), sessionConfigOptionIDUnsupported) {
+		t.Fatalf("SetSessionConfigOption() error = %v, want unsupported config", err)
 	}
 }
 
@@ -2313,6 +2484,27 @@ func newFakeAppServerSession(userAgent string, threadID string, turnID string) *
 	}
 }
 
+func appServerModelWithReasoning(
+	id string,
+	isDefault bool,
+	defaultReasoningEffort string,
+	supportedReasoningEfforts ...string,
+) appServerModel {
+	model := appServerModel{
+		ID:                     id,
+		DisplayName:            id,
+		IsDefault:              isDefault,
+		DefaultReasoningEffort: defaultReasoningEffort,
+	}
+	for _, effort := range supportedReasoningEfforts {
+		model.SupportedReasoningEfforts = append(model.SupportedReasoningEfforts, appServerReasoningEffortOption{
+			Description:     effort + " effort",
+			ReasoningEffort: effort,
+		})
+	}
+	return model
+}
+
 func (f *fakeAppServerSession) InitializeResponse() appServerInitializeResponse {
 	return f.initializeResp
 }
@@ -2459,6 +2651,32 @@ func containsAgentMessageText(updates []acp.SessionNotification, text string) bo
 			if chunk.Content.Text.Text == text {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func requireReasoningEffortOption(t *testing.T, options []acp.SessionConfigOption) *acp.SessionConfigOptionSelect {
+	t.Helper()
+	for _, option := range options {
+		if option.Select == nil {
+			continue
+		}
+		if option.Select.Id == acp.SessionConfigId(sessionConfigIDReasoningEffort) {
+			return option.Select
+		}
+	}
+	t.Fatalf("reasoning effort option missing: %#v", options)
+	return nil
+}
+
+func reasoningEffortOptionsInclude(option *acp.SessionConfigOptionSelect, effort string) bool {
+	if option == nil || option.Options.Ungrouped == nil {
+		return false
+	}
+	for _, candidate := range *option.Options.Ungrouped {
+		if candidate.Value == acp.SessionConfigValueId(effort) {
+			return true
 		}
 	}
 	return false

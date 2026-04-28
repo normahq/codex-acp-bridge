@@ -89,7 +89,7 @@ func TestBuildTurnInputItemsRejectsUnsupportedTypes(t *testing.T) {
 func TestBuildTurnStartParamsRejectsPromptWithoutTextOrImage(t *testing.T) {
 	_, err := buildTurnStartParams("thread-1", []acp.ContentBlock{
 		acp.TextBlock("   "),
-	}, "")
+	}, "", "")
 	if err == nil {
 		t.Fatal("buildTurnStartParams() error = nil, want non-nil")
 	}

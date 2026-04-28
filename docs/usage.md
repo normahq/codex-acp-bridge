@@ -77,6 +77,10 @@ acp-repl -- codex-acp-bridge
 - Supports `session/set_model` and `session/set_mode` for ACP session state.
   - `session/set_model` updates model selection used by subsequent `turn/start` calls.
   - `session/set_mode` is stored in ACP session state only; current bridge implementation does not forward mode into backend `thread/start` or `turn/start` payload fields.
+- Supports ACP session configuration options for reasoning effort.
+  - `session/new.configOptions` includes a `reasoning_effort` select option when app-server `model/list` advertises reasoning efforts for the current model.
+  - `session/set_config_option` with `configId=reasoning_effort` updates the effort used by subsequent `turn/start.effort` payloads.
+  - Supported values are model-advertised and may include values such as `minimal`, `low`, `medium`, `high`, or `xhigh`.
 - Populates ACP `session/new.models` from app-server `model/list` when available.
 - Model selection is ACP-native; prefer `session/set_model`.
 - Prompt content support:
@@ -99,6 +103,8 @@ Supported keys and mappings:
 - `profile` -> `thread/start.config.profile`
 - `compactPrompt` -> `thread/start.config.compact_prompt`
 - `config` -> merged into `thread/start.config`
+
+`config.model_reasoning_effort` remains available as a Codex-specific startup default. Prefer ACP `session/set_config_option` for interactive reasoning-effort changes after session creation.
 
 Validation and precedence:
 

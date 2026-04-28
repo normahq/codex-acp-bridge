@@ -46,7 +46,8 @@ type appServerThreadStartResponse struct {
 	Thread struct {
 		ID string `json:"id"`
 	} `json:"thread"`
-	Model string `json:"model,omitempty"`
+	Model           string  `json:"model,omitempty"`
+	ReasoningEffort *string `json:"reasoningEffort,omitempty"`
 }
 
 type appServerTurnStartResponse struct {
@@ -56,10 +57,17 @@ type appServerTurnStartResponse struct {
 }
 
 type appServerModel struct {
-	ID          string  `json:"id"`
-	DisplayName string  `json:"displayName"`
-	Description *string `json:"description,omitempty"`
-	IsDefault   bool    `json:"isDefault"`
+	ID                        string                           `json:"id"`
+	DisplayName               string                           `json:"displayName"`
+	Description               *string                          `json:"description,omitempty"`
+	IsDefault                 bool                             `json:"isDefault"`
+	DefaultReasoningEffort    string                           `json:"defaultReasoningEffort,omitempty"`
+	SupportedReasoningEfforts []appServerReasoningEffortOption `json:"supportedReasoningEfforts,omitempty"`
+}
+
+type appServerReasoningEffortOption struct {
+	Description     string `json:"description"`
+	ReasoningEffort string `json:"reasoningEffort"`
 }
 
 type appServerModelListResponse struct {
