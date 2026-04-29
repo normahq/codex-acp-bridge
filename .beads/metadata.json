@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "codex_acp_bridge",
+  "project_id": "7d247b44-9afc-4b14-b368-8992ebcfac4a"
+}
