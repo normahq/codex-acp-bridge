@@ -594,6 +594,41 @@ func TestSetSessionConfigOptionReasoningEffortAppliesToNextTurn(t *testing.T) {
 	}
 }
 
+func TestPreloadedTurnCompletedNotificationFlushesOnFirstTurnStart(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	queueNotification(session, "turn/completed", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "completed",
+		},
+	})
+
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	promptResp, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	})
+	if err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+	if promptResp.StopReason != acp.StopReasonEndTurn {
+		t.Fatalf("Prompt().StopReason = %q, want %q", promptResp.StopReason, acp.StopReasonEndTurn)
+	}
+	if got := len(session.turnStartParamsSnapshot()); got != 1 {
+		t.Fatalf("turn/start calls = %d, want 1", got)
+	}
+}
+
 func TestSetSessionConfigOptionRejectsUnsupportedReasoningEffort(t *testing.T) {
 	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
 	session.modelListResponses = []appServerModelListResponse{
@@ -3224,6 +3259,8 @@ type fakeAppServerSession struct {
 
 	initializeResp appServerInitializeResponse
 	events         chan appServerEvent
+	pendingEvents  []appServerEvent
+	turnStarted    bool
 
 	threadStartResp appServerThreadStartResponse
 	turnStartResp   appServerTurnStartResponse
@@ -3289,9 +3326,17 @@ func (f *fakeAppServerSession) ThreadStart(_ context.Context, params map[string]
 
 func (f *fakeAppServerSession) TurnStart(_ context.Context, params map[string]any) (appServerTurnStartResponse, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.turnStartParams = append(f.turnStartParams, params)
-	return f.turnStartResp, nil
+	f.turnStarted = true
+	pending := append([]appServerEvent(nil), f.pendingEvents...)
+	f.pendingEvents = nil
+	resp := f.turnStartResp
+	f.mu.Unlock()
+
+	for _, event := range pending {
+		f.events <- event
+	}
+	return resp, nil
 }
 
 func (f *fakeAppServerSession) ModelList(_ context.Context, params map[string]any) (appServerModelListResponse, error) {
@@ -3381,23 +3426,33 @@ func (f *fakeAppServerSession) modelListParamsSnapshot() []map[string]any {
 
 func queueNotification(session *fakeAppServerSession, method string, params map[string]any) {
 	raw, _ := json.Marshal(params)
-	session.events <- appServerEvent{
+	session.enqueueEvent(appServerEvent{
 		Notification: &appServerNotification{
 			Method: method,
 			Params: raw,
 		},
-	}
+	})
 }
 
 func queueRequest(session *fakeAppServerSession, method string, id json.RawMessage, params map[string]any) {
 	raw, _ := json.Marshal(params)
-	session.events <- appServerEvent{
+	session.enqueueEvent(appServerEvent{
 		Request: &appServerRequest{
 			ID:     id,
 			Method: method,
 			Params: raw,
 		},
+	})
+}
+
+func (f *fakeAppServerSession) enqueueEvent(event appServerEvent) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.turnStarted {
+		f.pendingEvents = append(f.pendingEvents, event)
+		return
 	}
+	f.events <- event
 }
 
 func assertShutdownError(t *testing.T, err error, wantMessage string) {
