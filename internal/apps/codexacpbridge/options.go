@@ -30,11 +30,30 @@ var (
 		"workspace-write":    {},
 		"danger-full-access": {},
 	}
+	validReasoningThoughtModes = map[string]struct{}{
+		reasoningThoughtsOff:     {},
+		reasoningThoughtsSummary: {},
+		reasoningThoughtsContent: {},
+		reasoningThoughtsBoth:    {},
+	}
+)
+
+const (
+	reasoningThoughtsOff     = "off"
+	reasoningThoughtsSummary = "summary"
+	reasoningThoughtsContent = "content"
+	reasoningThoughtsBoth    = "both"
+	defaultReasoningThoughts = reasoningThoughtsSummary
 )
 
 // Options configures Codex bridge backend -> ACP proxy behavior.
 type Options struct {
-	Name string
+	Name               string
+	MessageStreaming   bool
+	ReasoningStreaming bool
+	ReasoningThoughts  string
+
+	reasoningStreamingConfigured bool
 }
 
 type codexAppConfig struct {
@@ -76,7 +95,55 @@ func (o Options) appConfig() codexAppConfig {
 	return codexAppConfig{}
 }
 
+func (o *Options) SetReasoningStreaming(enabled bool) {
+	if o == nil {
+		return
+	}
+	o.ReasoningStreaming = enabled
+	o.reasoningStreamingConfigured = true
+}
+
+func (o Options) reasoningStreamingEnabled() bool {
+	if !o.reasoningStreamingConfigured {
+		return true
+	}
+	return o.ReasoningStreaming
+}
+
+func (o Options) reasoningThoughtsMode() string {
+	mode := strings.TrimSpace(o.ReasoningThoughts)
+	if mode == "" {
+		return defaultReasoningThoughts
+	}
+	return mode
+}
+
+func (o Options) reasoningThoughtsEnabled() bool {
+	return o.reasoningThoughtsMode() != reasoningThoughtsOff
+}
+
+func (o Options) reasoningThoughtsIncludeSummary() bool {
+	switch o.reasoningThoughtsMode() {
+	case reasoningThoughtsSummary, reasoningThoughtsBoth:
+		return true
+	default:
+		return false
+	}
+}
+
+func (o Options) reasoningThoughtsIncludeContent() bool {
+	switch o.reasoningThoughtsMode() {
+	case reasoningThoughtsContent, reasoningThoughtsBoth:
+		return true
+	default:
+		return false
+	}
+}
+
 func (o Options) validate() error {
+	if err := validateEnumValue("reasoning thoughts", o.reasoningThoughtsMode(), validReasoningThoughtModes); err != nil {
+		return err
+	}
 	return nil
 }
 

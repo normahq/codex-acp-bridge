@@ -20,6 +20,7 @@ const (
 	testApprovalsReviewerGuard = "guardian_subagent"
 	testMCPTransportStdio      = "stdio"
 	testPersonalityPragmatic   = "pragmatic"
+	testPlanRunTests           = "Run tests"
 	testReasoningXHigh         = "xhigh"
 	testServiceTierFlex        = "flex"
 )
@@ -366,6 +367,7 @@ func TestPromptForwardsTextAndImageBlocksToTurnStart(t *testing.T) {
 	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
 		return session, nil
 	}, "agent", codexAppConfig{}, &l)
+	agent.setBridgeOptions(Options{ReasoningThoughts: "content"})
 	agent.setConnection(conn)
 
 	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
@@ -426,6 +428,7 @@ func TestPromptRejectsAudioContentBlock(t *testing.T) {
 	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
 		return session, nil
 	}, "agent", codexAppConfig{}, &l)
+	agent.setBridgeOptions(Options{ReasoningThoughts: "content"})
 	agent.setConnection(conn)
 
 	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
@@ -472,6 +475,7 @@ func TestNewSessionIncludesModelsFromModelList(t *testing.T) {
 	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
 		return session, nil
 	}, "agent", codexAppConfig{}, &l)
+	agent.setBridgeOptions(Options{ReasoningThoughts: "content"})
 	agent.setConnection(conn)
 
 	resp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
@@ -507,6 +511,7 @@ func TestNewSessionIncludesReasoningEffortConfigOptionsFromModelList(t *testing.
 	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
 		return session, nil
 	}, "agent", codexAppConfig{}, &l)
+	agent.setBridgeOptions(Options{ReasoningThoughts: "content"})
 	agent.setConnection(conn)
 
 	resp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
@@ -922,8 +927,12 @@ func TestPromptStreamsAppServerNotificationsToACPUpdates(t *testing.T) {
 	if !containsToolCallText(updates, "  ok   ./...") {
 		t.Fatalf("missing tool call output delta with leading spaces in ACP updates: %#v", updates)
 	}
-	if !containsPlanEntry(updates, "Run tests") {
+	if !containsPlanEntry(updates, testPlanRunTests) {
 		t.Fatalf("missing plan update in ACP updates: %#v", updates)
+	}
+	planEntries := latestPlanEntries(updates)
+	if len(planEntries) != 1 || planEntries[0].Content != testPlanRunTests || planEntries[0].Status != acp.PlanEntryStatusCompleted {
+		t.Fatalf("latest plan entries = %#v, want one completed snapshot entry", planEntries)
 	}
 	if !containsToolCall(updates, "codex-item-item-cmd-1") {
 		t.Fatalf("missing tool call start/update in ACP updates: %#v", updates)
@@ -932,7 +941,32 @@ func TestPromptStreamsAppServerNotificationsToACPUpdates(t *testing.T) {
 
 func TestPromptDoesNotProjectNonToolItemLifecycleAsToolCalls(t *testing.T) {
 	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
-	for _, itemType := range []string{"reasoning", "plan", "agentMessage"} {
+	queueNotification(session, "item/started", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"item": map[string]any{
+			"type": "reasoning",
+			"id":   "item-reasoning-1",
+		},
+	})
+	queueNotification(session, "item/reasoning/textDelta", map[string]any{
+		"threadId":     "thr-1",
+		"turnId":       "turn-1",
+		"itemId":       "item-reasoning-1",
+		"contentIndex": 0,
+		"delta":        "thinking",
+	})
+	queueNotification(session, "item/completed", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"item": map[string]any{
+			"type":    "reasoning",
+			"id":      "item-reasoning-1",
+			"summary": []any{},
+			"content": []any{"thinking"},
+		},
+	})
+	for _, itemType := range []string{"plan", "agentMessage"} {
 		itemID := "item-" + itemType + "-1"
 		queueNotification(session, "item/started", map[string]any{
 			"threadId": "thr-1",
@@ -953,13 +987,6 @@ func TestPromptDoesNotProjectNonToolItemLifecycleAsToolCalls(t *testing.T) {
 			},
 		})
 	}
-	queueNotification(session, "item/reasoning/textDelta", map[string]any{
-		"threadId":     "thr-1",
-		"turnId":       "turn-1",
-		"itemId":       "item-reasoning-1",
-		"contentIndex": 0,
-		"delta":        "thinking",
-	})
 	queueNotification(session, "turn/completed", map[string]any{
 		"threadId": "thr-1",
 		"turn": map[string]any{
@@ -973,6 +1000,7 @@ func TestPromptDoesNotProjectNonToolItemLifecycleAsToolCalls(t *testing.T) {
 	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
 		return session, nil
 	}, "agent", codexAppConfig{}, &l)
+	agent.setBridgeOptions(Options{ReasoningThoughts: "content"})
 	agent.setConnection(conn)
 
 	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
@@ -996,6 +1024,300 @@ func TestPromptDoesNotProjectNonToolItemLifecycleAsToolCalls(t *testing.T) {
 	}
 	if countThoughtText(updates, "thinking") != 1 {
 		t.Fatalf("missing reasoning text delta thought update: %#v", updates)
+	}
+}
+
+func TestPromptEmitsCompletedReasoningSummaryWhenReasoningStreamingDisabled(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	queueNotification(session, "item/completed", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"item": map[string]any{
+			"type":    "reasoning",
+			"id":      "item-reasoning-1",
+			"summary": []any{"summary one", "summary two"},
+			"content": []any{"raw one"},
+		},
+	})
+	queueNotification(session, "turn/completed", map[string]any{
+		"threadId": "thr-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "completed",
+		},
+	})
+
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+	opts := Options{}
+	opts.SetReasoningStreaming(false)
+	agent.setBridgeOptions(opts)
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	}); err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+
+	chunks := thoughtChunks(conn.sessionUpdates(newResp.SessionId))
+	if len(chunks) != 2 {
+		t.Fatalf("thought chunk count = %d, want 2: %#v", len(chunks), chunks)
+	}
+	for i, wantText := range []string{"summary one", "summary two"} {
+		if got := thoughtChunkText(chunks[i]); got != wantText {
+			t.Fatalf("chunk[%d] text = %q, want %q", i, got, wantText)
+		}
+		if got := thoughtChunkMetaString(chunks[i], metaReasoningKindKey); got != reasoningKindSummary {
+			t.Fatalf("chunk[%d] reasoning kind = %q, want %q", i, got, reasoningKindSummary)
+		}
+		if got, ok := thoughtChunkMetaInt64(chunks[i], metaSummaryIndexKey); !ok || got != int64(i) {
+			t.Fatalf("chunk[%d] summary index = (%d,%t), want (%d,true)", i, got, ok, i)
+		}
+		if got, ok := thoughtChunkMetaBool(chunks[i], metaCompletedKey); !ok || !got {
+			t.Fatalf("chunk[%d] completed meta = (%t,%t), want (true,true)", i, got, ok)
+		}
+	}
+	if countThoughtText(conn.sessionUpdates(newResp.SessionId), "raw one") != 0 {
+		t.Fatalf("unexpected raw reasoning chunk in summary mode: %#v", chunks)
+	}
+}
+
+func TestPromptStreamsReasoningSummaryThoughtsByDefault(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	queueNotification(session, "item/started", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"item": map[string]any{
+			"type": "reasoning",
+			"id":   "item-reasoning-1",
+		},
+	})
+	queueNotification(session, "item/reasoning/textDelta", map[string]any{
+		"threadId":     "thr-1",
+		"turnId":       "turn-1",
+		"itemId":       "item-reasoning-1",
+		"contentIndex": 0,
+		"delta":        "raw",
+	})
+	queueNotification(session, "item/reasoning/summaryTextDelta", map[string]any{
+		"threadId":     "thr-1",
+		"turnId":       "turn-1",
+		"itemId":       "item-reasoning-1",
+		"summaryIndex": 0,
+		"delta":        "summary",
+	})
+	queueNotification(session, "item/completed", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"item": map[string]any{
+			"type":    "reasoning",
+			"id":      "item-reasoning-1",
+			"summary": []any{"summary"},
+			"content": []any{"raw"},
+		},
+	})
+	queueNotification(session, "turn/completed", map[string]any{
+		"threadId": "thr-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "completed",
+		},
+	})
+
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	}); err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+
+	chunks := thoughtChunks(conn.sessionUpdates(newResp.SessionId))
+	if len(chunks) != 2 {
+		t.Fatalf("thought chunk count = %d, want 2: %#v", len(chunks), chunks)
+	}
+	if got := thoughtChunkText(chunks[0]); got != "summary" {
+		t.Fatalf("first thought text = %q, want summary", got)
+	}
+	if got := thoughtChunkMetaString(chunks[0], metaReasoningKindKey); got != reasoningKindSummary {
+		t.Fatalf("first thought reasoning kind = %q, want %q", got, reasoningKindSummary)
+	}
+	if got, ok := thoughtChunkMetaBool(chunks[0], metaCompletedKey); !ok || got {
+		t.Fatalf("first thought completed meta = (%t,%t), want (false,true)", got, ok)
+	}
+	if got := thoughtChunkText(chunks[1]); got != "" {
+		t.Fatalf("second thought text = %q, want empty closing chunk", got)
+	}
+	if got, ok := thoughtChunkMetaBool(chunks[1], metaCompletedKey); !ok || !got {
+		t.Fatalf("second thought completed meta = (%t,%t), want (true,true)", got, ok)
+	}
+	if countThoughtText(conn.sessionUpdates(newResp.SessionId), "raw") != 0 {
+		t.Fatalf("unexpected raw reasoning text in default summary mode: %#v", chunks)
+	}
+}
+
+func TestPromptStreamsReasoningContentThoughtsWhenConfigured(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	queueNotification(session, "item/started", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"item": map[string]any{
+			"type": "reasoning",
+			"id":   "item-reasoning-1",
+		},
+	})
+	queueNotification(session, "item/reasoning/textDelta", map[string]any{
+		"threadId":     "thr-1",
+		"turnId":       "turn-1",
+		"itemId":       "item-reasoning-1",
+		"contentIndex": 0,
+		"delta":        "raw",
+	})
+	queueNotification(session, "item/reasoning/summaryTextDelta", map[string]any{
+		"threadId":     "thr-1",
+		"turnId":       "turn-1",
+		"itemId":       "item-reasoning-1",
+		"summaryIndex": 0,
+		"delta":        "summary",
+	})
+	queueNotification(session, "item/completed", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"item": map[string]any{
+			"type":    "reasoning",
+			"id":      "item-reasoning-1",
+			"summary": []any{"summary"},
+			"content": []any{"raw"},
+		},
+	})
+	queueNotification(session, "turn/completed", map[string]any{
+		"threadId": "thr-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "completed",
+		},
+	})
+
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+	agent.setBridgeOptions(Options{ReasoningThoughts: "content"})
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	}); err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+
+	chunks := thoughtChunks(conn.sessionUpdates(newResp.SessionId))
+	if len(chunks) != 2 {
+		t.Fatalf("thought chunk count = %d, want 2: %#v", len(chunks), chunks)
+	}
+	if got := thoughtChunkMetaString(chunks[0], metaReasoningKindKey); got != reasoningKindContent {
+		t.Fatalf("first thought reasoning kind = %q, want %q", got, reasoningKindContent)
+	}
+	if got := thoughtChunkText(chunks[0]); got != "raw" {
+		t.Fatalf("first thought text = %q, want raw", got)
+	}
+	if countThoughtText(conn.sessionUpdates(newResp.SessionId), "summary") != 0 {
+		t.Fatalf("unexpected summary reasoning text in content mode: %#v", chunks)
+	}
+}
+
+func TestPromptStreamsReasoningBothLanesWhenConfigured(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	queueNotification(session, "item/started", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"item": map[string]any{
+			"type": "reasoning",
+			"id":   "item-reasoning-1",
+		},
+	})
+	queueNotification(session, "item/reasoning/summaryTextDelta", map[string]any{
+		"threadId":     "thr-1",
+		"turnId":       "turn-1",
+		"itemId":       "item-reasoning-1",
+		"summaryIndex": 0,
+		"delta":        "summary",
+	})
+	queueNotification(session, "item/reasoning/textDelta", map[string]any{
+		"threadId":     "thr-1",
+		"turnId":       "turn-1",
+		"itemId":       "item-reasoning-1",
+		"contentIndex": 0,
+		"delta":        "raw",
+	})
+	queueNotification(session, "item/completed", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"item": map[string]any{
+			"type":    "reasoning",
+			"id":      "item-reasoning-1",
+			"summary": []any{"summary"},
+			"content": []any{"raw"},
+		},
+	})
+	queueNotification(session, "turn/completed", map[string]any{
+		"threadId": "thr-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "completed",
+		},
+	})
+
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+	agent.setBridgeOptions(Options{ReasoningThoughts: "both"})
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	}); err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+
+	chunks := thoughtChunks(conn.sessionUpdates(newResp.SessionId))
+	if len(chunks) != 4 {
+		t.Fatalf("thought chunk count = %d, want 4: %#v", len(chunks), chunks)
+	}
+	if !containsThoughtSubstring(conn.sessionUpdates(newResp.SessionId), "summary") || !containsThoughtSubstring(conn.sessionUpdates(newResp.SessionId), "raw") {
+		t.Fatalf("missing expected thought texts in both mode: %#v", chunks)
 	}
 }
 
@@ -1049,6 +1371,96 @@ func TestPromptSuppressesCommentaryAgentMessage(t *testing.T) {
 	}
 	if countThoughtChunks(updates) != 0 {
 		t.Fatalf("unexpected thought chunks for commentary: %#v", updates)
+	}
+}
+
+func TestPromptStreamsAgentMessageDeltasWhenMessageStreamingEnabled(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	queueNotification(session, "item/started", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"item": map[string]any{
+			"type":  "agentMessage",
+			"id":    "item-msg-1",
+			"text":  "",
+			"phase": "commentary",
+		},
+	})
+	queueNotification(session, "item/agentMessage/delta", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"itemId":   "item-msg-1",
+		"delta":    "work",
+	})
+	queueNotification(session, "item/agentMessage/delta", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"itemId":   "item-msg-1",
+		"delta":    "ing",
+	})
+	queueNotification(session, "item/completed", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"item": map[string]any{
+			"type":  "agentMessage",
+			"id":    "item-msg-1",
+			"text":  "working",
+			"phase": "commentary",
+		},
+	})
+	queueNotification(session, "turn/completed", map[string]any{
+		"threadId": "thr-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "completed",
+		},
+	})
+
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+	agent.setBridgeOptions(Options{MessageStreaming: true})
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	}); err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+
+	chunks := agentMessageChunks(conn.sessionUpdates(newResp.SessionId))
+	if len(chunks) != 3 {
+		t.Fatalf("agent message chunks = %d, want 3", len(chunks))
+	}
+	if got := chunkText(chunks[0]); got != "work" {
+		t.Fatalf("first chunk text = %q, want %q", got, "work")
+	}
+	if got := chunkText(chunks[1]); got != "ing" {
+		t.Fatalf("second chunk text = %q, want %q", got, "ing")
+	}
+	for i := 0; i < 2; i++ {
+		if got := chunkMetaString(chunks[i], metaItemIDKey); got != "item-msg-1" {
+			t.Fatalf("chunk %d itemId = %q, want item-msg-1", i, got)
+		}
+		if got, ok := chunkMetaBool(chunks[i], metaCompletedKey); !ok || got {
+			t.Fatalf("chunk %d completed = %v,%v, want false,true", i, got, ok)
+		}
+		if got := chunkMetaString(chunks[i], metaPhaseKey); got != "commentary" {
+			t.Fatalf("chunk %d phase = %q, want commentary", i, got)
+		}
+	}
+	if got := chunkText(chunks[2]); got != "" {
+		t.Fatalf("closing chunk text = %q, want empty", got)
+	}
+	if got, ok := chunkMetaBool(chunks[2], metaCompletedKey); !ok || !got {
+		t.Fatalf("closing chunk completed = %v,%v, want true,true", got, ok)
 	}
 }
 
@@ -1117,7 +1529,7 @@ func TestPromptForwardsCompletedAgentMessageForVisiblePhases(t *testing.T) {
 	}
 }
 
-func TestPromptPrefersCompletedAgentMessageTextOverBufferedDeltas(t *testing.T) {
+func TestPromptIgnoresAgentMessageDeltasWhenMessageStreamingDisabled(t *testing.T) {
 	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
 	queueNotification(session, "item/agentMessage/delta", map[string]any{
 		"threadId": "thr-1",
@@ -1167,6 +1579,73 @@ func TestPromptPrefersCompletedAgentMessageTextOverBufferedDeltas(t *testing.T) 
 	}
 	if containsAgentMessageText(updates, "draft") {
 		t.Fatalf("unexpected buffered draft agent message text: %#v", updates)
+	}
+}
+
+func TestPromptEmitsCompletedAgentMessageTextWhenStreamingEnabledWithoutDeltas(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	queueNotification(session, "item/started", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"item": map[string]any{
+			"type":  "agentMessage",
+			"id":    "item-msg-1",
+			"text":  "",
+			"phase": "final_answer",
+		},
+	})
+	queueNotification(session, "item/completed", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"item": map[string]any{
+			"type":  "agentMessage",
+			"id":    "item-msg-1",
+			"text":  "final",
+			"phase": "final_answer",
+		},
+	})
+	queueNotification(session, "turn/completed", map[string]any{
+		"threadId": "thr-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "completed",
+		},
+	})
+
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+	agent.setBridgeOptions(Options{MessageStreaming: true})
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	}); err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+
+	chunks := agentMessageChunks(conn.sessionUpdates(newResp.SessionId))
+	if len(chunks) != 1 {
+		t.Fatalf("agent message chunks = %d, want 1", len(chunks))
+	}
+	if got := chunkText(chunks[0]); got != "final" {
+		t.Fatalf("chunk text = %q, want final", got)
+	}
+	if got := chunkMetaString(chunks[0], metaItemIDKey); got != "item-msg-1" {
+		t.Fatalf("chunk itemId = %q, want item-msg-1", got)
+	}
+	if got, ok := chunkMetaBool(chunks[0], metaCompletedKey); !ok || !got {
+		t.Fatalf("chunk completed = %v,%v, want true,true", got, ok)
+	}
+	if got := chunkMetaString(chunks[0], metaPhaseKey); got != "final_answer" {
+		t.Fatalf("chunk phase = %q, want final_answer", got)
 	}
 }
 
@@ -1628,6 +2107,10 @@ func TestPromptMapsExtendedNotifications(t *testing.T) {
 	if !containsPlanEntry(updates, "Run tests") {
 		t.Fatalf("missing aggregated plan delta update: %#v", updates)
 	}
+	planEntries := latestPlanEntries(updates)
+	if len(planEntries) != 1 || planEntries[0].Content != "Run tests" || planEntries[0].Status != acp.PlanEntryStatusInProgress {
+		t.Fatalf("latest plan entries = %#v, want one in-progress preview entry", planEntries)
+	}
 	if !containsToolCallText(updates, "y\n") {
 		t.Fatalf("missing terminal interaction content: %#v", updates)
 	}
@@ -1958,6 +2441,174 @@ func TestPromptRebindsThreadIDFromThreadStartedNotification(t *testing.T) {
 	updates := conn.sessionUpdates(newResp.SessionId)
 	if countThoughtChunks(updates) != 0 {
 		t.Fatalf("unexpected thought updates after thread-id rebind: %#v", updates)
+	}
+}
+
+func TestPromptPlanDeltaEmitsFullReplacementEntries(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	queueNotification(session, "item/plan/delta", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"itemId":   "item-plan-1",
+		"delta":    "Run ",
+	})
+	queueNotification(session, "item/plan/delta", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"itemId":   "item-plan-1",
+		"delta":    "tests",
+	})
+	queueNotification(session, "item/plan/delta", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"itemId":   "item-plan-2",
+		"delta":    "Lint",
+	})
+	queueNotification(session, "turn/completed", map[string]any{
+		"threadId": "thr-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "completed",
+		},
+	})
+
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	}); err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+
+	entries := latestPlanEntries(conn.sessionUpdates(newResp.SessionId))
+	if len(entries) != 2 {
+		t.Fatalf("latest plan entries len = %d, want 2: %#v", len(entries), entries)
+	}
+	if entries[0].Content != "Run tests" || entries[1].Content != "Lint" {
+		t.Fatalf("latest plan entries = %#v, want ordered full replacement", entries)
+	}
+	for _, entry := range entries {
+		if entry.Status != acp.PlanEntryStatusInProgress {
+			t.Fatalf("preview plan entry status = %q, want in_progress", entry.Status)
+		}
+	}
+}
+
+func TestPromptCompletedPlanItemOverridesDraftText(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	queueNotification(session, "item/plan/delta", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"itemId":   "item-plan-1",
+		"delta":    "Draft",
+	})
+	queueNotification(session, "item/completed", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"item": map[string]any{
+			"type": "plan",
+			"id":   "item-plan-1",
+			"text": "Authoritative plan",
+		},
+	})
+	queueNotification(session, "turn/completed", map[string]any{
+		"threadId": "thr-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "completed",
+		},
+	})
+
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	}); err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+
+	entries := latestPlanEntries(conn.sessionUpdates(newResp.SessionId))
+	if len(entries) != 1 || entries[0].Content != "Authoritative plan" {
+		t.Fatalf("latest plan entries = %#v, want authoritative completed text", entries)
+	}
+}
+
+func TestPromptPlanSnapshotClearsPreviewState(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	queueNotification(session, "item/plan/delta", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"itemId":   "item-plan-1",
+		"delta":    "Draft one",
+	})
+	queueNotification(session, "item/plan/delta", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"itemId":   "item-plan-2",
+		"delta":    "Draft two",
+	})
+	queueNotification(session, "turn/plan/updated", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"plan": []any{
+			map[string]any{"step": "Snapshot step", "status": "completed"},
+		},
+	})
+	queueNotification(session, "item/plan/delta", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"itemId":   "item-plan-3",
+		"delta":    "Later preview",
+	})
+	queueNotification(session, "turn/completed", map[string]any{
+		"threadId": "thr-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "completed",
+		},
+	})
+
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	}); err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+
+	entries := latestPlanEntries(conn.sessionUpdates(newResp.SessionId))
+	if len(entries) != 1 || entries[0].Content != "Later preview" {
+		t.Fatalf("latest plan entries = %#v, want preview rebuilt after snapshot reset", entries)
 	}
 }
 
@@ -2375,7 +3026,7 @@ func TestServerRequestResolvedClearsPendingRequest(t *testing.T) {
 		threadID:         "thr-1",
 		turnID:           "turn-1",
 		pendingRequests:  map[string]string{"1": "item/tool/call"},
-		planDeltaByItem:  map[string]string{},
+		planItems:        map[string]planItemState{},
 		latestRateLimits: map[string]any{},
 	}
 
@@ -2656,6 +3307,114 @@ func containsAgentMessageText(updates []acp.SessionNotification, text string) bo
 	return false
 }
 
+func agentMessageChunks(updates []acp.SessionNotification) []*acp.SessionUpdateAgentMessageChunk {
+	chunks := make([]*acp.SessionUpdateAgentMessageChunk, 0, len(updates))
+	for _, update := range updates {
+		if update.Update.AgentMessageChunk != nil {
+			chunks = append(chunks, update.Update.AgentMessageChunk)
+		}
+	}
+	return chunks
+}
+
+func chunkText(chunk *acp.SessionUpdateAgentMessageChunk) string {
+	if chunk == nil || chunk.Content.Text == nil {
+		return ""
+	}
+	return chunk.Content.Text.Text
+}
+
+func chunkMetaString(chunk *acp.SessionUpdateAgentMessageChunk, key string) string {
+	if chunk == nil || chunk.Meta == nil {
+		return ""
+	}
+	v, ok := chunk.Meta[key]
+	if !ok || v == nil {
+		return ""
+	}
+	s, ok := v.(string)
+	if !ok {
+		return ""
+	}
+	return s
+}
+
+func chunkMetaBool(chunk *acp.SessionUpdateAgentMessageChunk, key string) (bool, bool) {
+	if chunk == nil || chunk.Meta == nil {
+		return false, false
+	}
+	v, ok := chunk.Meta[key]
+	if !ok || v == nil {
+		return false, false
+	}
+	b, ok := v.(bool)
+	return b, ok
+}
+
+func thoughtChunks(updates []acp.SessionNotification) []*acp.SessionUpdateAgentThoughtChunk {
+	chunks := make([]*acp.SessionUpdateAgentThoughtChunk, 0, len(updates))
+	for _, update := range updates {
+		if chunk := update.Update.AgentThoughtChunk; chunk != nil {
+			chunks = append(chunks, chunk)
+		}
+	}
+	return chunks
+}
+
+func thoughtChunkText(chunk *acp.SessionUpdateAgentThoughtChunk) string {
+	if chunk == nil || chunk.Content.Text == nil {
+		return ""
+	}
+	return chunk.Content.Text.Text
+}
+
+func thoughtChunkMetaString(chunk *acp.SessionUpdateAgentThoughtChunk, key string) string {
+	if chunk == nil || chunk.Meta == nil {
+		return ""
+	}
+	v, ok := chunk.Meta[key]
+	if !ok || v == nil {
+		return ""
+	}
+	s, ok := v.(string)
+	if !ok {
+		return ""
+	}
+	return s
+}
+
+func thoughtChunkMetaBool(chunk *acp.SessionUpdateAgentThoughtChunk, key string) (bool, bool) {
+	if chunk == nil || chunk.Meta == nil {
+		return false, false
+	}
+	v, ok := chunk.Meta[key]
+	if !ok || v == nil {
+		return false, false
+	}
+	b, ok := v.(bool)
+	return b, ok
+}
+
+func thoughtChunkMetaInt64(chunk *acp.SessionUpdateAgentThoughtChunk, key string) (int64, bool) {
+	if chunk == nil || chunk.Meta == nil {
+		return 0, false
+	}
+	v, ok := chunk.Meta[key]
+	if !ok || v == nil {
+		return 0, false
+	}
+	switch typed := v.(type) {
+	case float64:
+		return int64(typed), true
+	case int64:
+		return typed, true
+	case int:
+		return int64(typed), true
+	default:
+		return 0, false
+	}
+}
+
 func requireReasoningEffortOption(t *testing.T, options []acp.SessionConfigOption) *acp.SessionConfigOptionSelect {
 	t.Helper()
 	for _, option := range options {
@@ -2703,6 +3462,15 @@ func containsPlanEntry(updates []acp.SessionNotification, step string) bool {
 		}
 	}
 	return false
+}
+
+func latestPlanEntries(updates []acp.SessionNotification) []acp.PlanEntry {
+	for i := len(updates) - 1; i >= 0; i-- {
+		if plan := updates[i].Update.Plan; plan != nil {
+			return append([]acp.PlanEntry(nil), plan.Entries...)
+		}
+	}
+	return nil
 }
 
 func containsToolCall(updates []acp.SessionNotification, toolCallID string) bool {

@@ -66,9 +66,44 @@ func TestCommandExposesOnlyBridgeFlags(t *testing.T) {
 			t.Fatalf("flag %q unexpectedly present", removedFlag)
 		}
 	}
-	for _, expectedFlag := range []string{"name", "debug"} {
+	for _, expectedFlag := range []string{"name", "message-streaming", "reasoning-streaming", "reasoning-thoughts", "debug"} {
 		if got := cmd.Flags().Lookup(expectedFlag); got == nil {
 			t.Fatalf("flag %q missing", expectedFlag)
 		}
+	}
+}
+
+func TestCommandPassesExecuteContextToRunProxy(t *testing.T) {
+	origRunProxy := runProxy
+	origInitLogging := initLogging
+	t.Cleanup(func() {
+		runProxy = origRunProxy
+		initLogging = origInitLogging
+	})
+
+	type ctxKey string
+	const key ctxKey = "signal-test"
+
+	initLogging = func(...logging.OptOptionsSetter) error {
+		return nil
+	}
+
+	var gotValue string
+	runProxy = func(ctx context.Context, _ string, _ codexacpbridge.Options, _ io.Reader, _, _ io.Writer) error {
+		gotValue, _ = ctx.Value(key).(string)
+		return nil
+	}
+
+	cmd := Command()
+	cmd.SetIn(strings.NewReader(""))
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+
+	ctx := context.WithValue(context.Background(), key, "propagated")
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("ExecuteContext() error = %v", err)
+	}
+	if gotValue != "propagated" {
+		t.Fatalf("runProxy context value = %q, want %q", gotValue, "propagated")
 	}
 }

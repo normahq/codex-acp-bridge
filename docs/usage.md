@@ -24,6 +24,12 @@ codex-acp-bridge
 
 # Set ACP agent name seen by ACP clients in initialize.agentInfo.name
 codex-acp-bridge --name team-codex
+
+# Stream app-server agent messages live
+codex-acp-bridge --message-streaming
+
+# Disable app-server reasoning/thought streaming
+codex-acp-bridge --reasoning-streaming=false
 ```
 
 ## ACP Tooling Examples
@@ -53,6 +59,15 @@ acp-repl -- codex-acp-bridge
 - `--name`:
   ACP agent name reported in `initialize.agentInfo.name`.
   Default: `norma-codex-acp-bridge`.
+- `--message-streaming`:
+  Stream app-server `item/agentMessage/delta` notifications as ACP `agent_message_chunk` updates.
+  Default: `false`.
+- `--reasoning-streaming`:
+  Stream app-server reasoning deltas live when enabled. When disabled, emit final ACP `agent_thought_chunk` updates from completed reasoning items only.
+  Default: `true`.
+- `--reasoning-thoughts`:
+  Select which reasoning lane is projected as ACP thoughts: `off`, `summary`, `content`, or `both`.
+  Default: `summary`.
 - `--debug`:
   Enable debug logging for the bridge process.
 
@@ -61,10 +76,25 @@ acp-repl -- codex-acp-bridge
 - Starts the Codex backend with per-session working directory selection:
   - If ACP `session/new.params.cwd` is set, that value is used for the backend process.
   - Otherwise, the bridge process working directory is used.
+- Negotiates app-server notification opt-outs during `initialize`:
+  - `--message-streaming=false` opts out `item/agentMessage/delta`.
+  - `--reasoning-streaming=false` opts out `item/reasoning/textDelta`, `item/reasoning/summaryTextDelta`, and `item/reasoning/summaryPartAdded`.
+  - `--reasoning-thoughts=summary` opts out raw `item/reasoning/textDelta`.
+  - `--reasoning-thoughts=content` opts out `item/reasoning/summaryTextDelta` and `item/reasoning/summaryPartAdded`.
+  - `--reasoning-thoughts=off` opts out all reasoning delta notifications.
 - Opens ACP agent-side stdio connection for clients.
 - Creates one backend session per ACP session.
 - Reads per-session Codex defaults from `session/new.params._meta.codex` (strictly validated).
 - Supports ACP cancellation via `session/cancel`.
+- Optional agent message streaming:
+  - when `--message-streaming=true`, every app-server `agentMessage` item is streamed as ACP `agent_message_chunk`
+  - streamed message chunks carry `_meta["codex-acp-bridge/itemId"]`, `_meta["codex-acp-bridge/completed"]`, and `_meta["codex-acp-bridge/phase"]`
+  - `item/completed` closes the logical message; it does not complete the ACP turn
+- Optional lane-aware reasoning thoughts:
+  - `summary` projects `item/reasoning/summaryTextDelta` and completed `summary[]`
+  - `content` projects `item/reasoning/textDelta` and completed `content[]`
+  - `both` projects both lanes and keeps them distinct via `_meta`
+  - thought chunks carry `_meta["codex-acp-bridge/itemId"]`, `_meta["codex-acp-bridge/reasoningKind"]`, index metadata, and `_meta["codex-acp-bridge/completed"]`
 - Supports per-session MCP servers via ACP `session/new` `mcpServers` parameter.
   - Supported transports: `stdio`, `http`.
   - `sse` is not supported.

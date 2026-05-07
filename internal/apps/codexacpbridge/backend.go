@@ -13,9 +13,12 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/rs/zerolog"
 )
+
+const defaultBackendShutdownGracePeriod = 2 * time.Second
 
 type appServerRPCError struct {
 	Code    int    `json:"code"`
@@ -109,12 +112,15 @@ type appServerBackend struct {
 	nextID    uint64
 
 	events   chan appServerEvent
+	closing  chan struct{}
 	done     chan struct{}
 	readDone chan struct{}
 
 	finalizeOnce sync.Once
 	waitErr      error
 	closeOnce    sync.Once
+
+	shutdownGracePeriod time.Duration
 
 	initializeResp appServerInitializeResponse
 }
@@ -140,6 +146,7 @@ func connectAppServerBackend(
 	clientName string,
 	stderr io.Writer,
 	logger *zerolog.Logger,
+	opts Options,
 ) (*appServerBackend, error) {
 	if len(command) == 0 {
 		return nil, errors.New("empty codex command")
@@ -168,6 +175,20 @@ func connectAppServerBackend(
 		_ = stdin.Close()
 		return nil, fmt.Errorf("bridge backend stdout pipe: %w", err)
 	}
+	backend := &appServerBackend{
+		cmd:                 cmd,
+		stdin:               stdin,
+		logger:              logger,
+		pending:             make(map[string]chan appServerRPCResponse),
+		events:              make(chan appServerEvent, 256),
+		closing:             make(chan struct{}),
+		done:                make(chan struct{}),
+		readDone:            make(chan struct{}),
+		shutdownGracePeriod: defaultBackendShutdownGracePeriod,
+	}
+	cmd.Cancel = func() error {
+		return backend.Close()
+	}
 	logger.Debug().
 		Str("cwd", cmd.Dir).
 		Str("cmd", command[0]).
@@ -178,19 +199,10 @@ func connectAppServerBackend(
 		return nil, fmt.Errorf("start codex bridge backend: %w", err)
 	}
 
-	backend := &appServerBackend{
-		cmd:      cmd,
-		stdin:    stdin,
-		logger:   logger,
-		pending:  make(map[string]chan appServerRPCResponse),
-		events:   make(chan appServerEvent, 256),
-		done:     make(chan struct{}),
-		readDone: make(chan struct{}),
-	}
 	go backend.readLoop(stdout)
 	go backend.waitLoop()
 
-	initializeResp, err := backend.initialize(ctx, clientName)
+	initializeResp, err := backend.initialize(ctx, clientName, opts)
 	if err != nil {
 		_ = backend.Close()
 		_ = backend.Wait()
@@ -262,17 +274,50 @@ func (b *appServerBackend) RespondRequestError(ctx context.Context, req *appServ
 	return b.sendError(ctx, req.ID, code, message, data)
 }
 
-func (b *appServerBackend) initialize(ctx context.Context, clientName string) (appServerInitializeResponse, error) {
-	params := map[string]any{
+func appServerInitializeParams(clientName string, opts Options) map[string]any {
+	capabilities := map[string]any{
+		"experimentalApi": true,
+	}
+	if optOut := appServerOptOutNotificationMethods(opts); len(optOut) > 0 {
+		capabilities["optOutNotificationMethods"] = optOut
+	}
+	return map[string]any{
 		"clientInfo": map[string]any{
 			"name":    strings.TrimSpace(clientName),
 			"title":   "Norma Codex ACP Bridge",
 			"version": "dev",
 		},
-		"capabilities": map[string]any{
-			"experimentalApi": true,
-		},
+		"capabilities": capabilities,
 	}
+}
+
+func appServerOptOutNotificationMethods(opts Options) []string {
+	methods := make([]string, 0, 4)
+	if !opts.MessageStreaming {
+		methods = append(methods, methodAgentMessageDelta)
+	}
+	if !opts.reasoningThoughtsEnabled() || !opts.reasoningStreamingEnabled() {
+		methods = append(methods,
+			methodReasoningTextDelta,
+			methodReasoningSummaryTextDelta,
+			methodReasoningSummaryPartAdded,
+		)
+		return methods
+	}
+	if !opts.reasoningThoughtsIncludeContent() {
+		methods = append(methods, methodReasoningTextDelta)
+	}
+	if !opts.reasoningThoughtsIncludeSummary() {
+		methods = append(methods,
+			methodReasoningSummaryTextDelta,
+			methodReasoningSummaryPartAdded,
+		)
+	}
+	return methods
+}
+
+func (b *appServerBackend) initialize(ctx context.Context, clientName string, opts Options) (appServerInitializeResponse, error) {
+	params := appServerInitializeParams(clientName, opts)
 	var resp appServerInitializeResponse
 	if err := b.call(ctx, "initialize", params, &resp); err != nil {
 		return appServerInitializeResponse{}, fmt.Errorf("initialize bridge backend: %w", err)
@@ -406,7 +451,7 @@ func (b *appServerBackend) readLoop(stdout io.Reader) {
 			}
 		}
 		if err != nil {
-			if errors.Is(err, io.EOF) {
+			if b.isExpectedReadLoopStop(err) {
 				return
 			}
 			b.logger.Warn().Err(err).Msg("bridge backend read loop stopped")
@@ -471,9 +516,14 @@ func (b *appServerBackend) emitEvent(event appServerEvent) {
 	select {
 	case <-b.done:
 		return
-	default:
+	case b.events <- event:
+		return
+	case <-b.closing:
+		select {
+		case b.events <- event:
+		default:
+		}
 	}
-	b.events <- event
 }
 
 func (b *appServerBackend) waitLoop() {
@@ -491,7 +541,7 @@ func (b *appServerBackend) failPending(waitErr error) {
 	b.pendingMu.Lock()
 	defer b.pendingMu.Unlock()
 	backendErr := errors.New("bridge backend stopped")
-	if waitErr != nil && !errors.Is(waitErr, os.ErrProcessDone) {
+	if waitErr != nil && !errors.Is(waitErr, os.ErrProcessDone) && !b.isShuttingDown() {
 		backendErr = fmt.Errorf("bridge backend exited: %w", waitErr)
 	}
 	for key, ch := range b.pending {
@@ -503,15 +553,35 @@ func (b *appServerBackend) failPending(waitErr error) {
 func (b *appServerBackend) Close() error {
 	var closeErr error
 	b.closeOnce.Do(func() {
+		close(b.closing)
 		if err := b.stdin.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
 			closeErr = err
 		}
-		if b.cmd.Process != nil {
-			if err := b.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
-				if closeErr == nil {
-					closeErr = err
-				}
+		if b.cmd == nil || b.cmd.Process == nil {
+			return
+		}
+
+		waitForExit := false
+		if err := b.cmd.Process.Signal(os.Interrupt); err != nil {
+			if !errors.Is(err, os.ErrProcessDone) && closeErr == nil {
+				closeErr = err
 			}
+		} else {
+			waitForExit = true
+		}
+
+		if waitForExit {
+			timer := time.NewTimer(b.shutdownGracePeriod)
+			defer timer.Stop()
+			select {
+			case <-b.done:
+				return
+			case <-timer.C:
+			}
+		}
+
+		if err := b.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) && closeErr == nil {
+			closeErr = err
 		}
 	})
 	return closeErr
@@ -527,4 +597,34 @@ func (b *appServerBackend) Wait() error {
 
 func canonicalRequestID(id json.RawMessage) string {
 	return strings.TrimSpace(string(id))
+}
+
+func (b *appServerBackend) isExpectedReadLoopStop(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+	return b.isShuttingDown() && isClosedPipeReadError(err)
+}
+
+func (b *appServerBackend) isShuttingDown() bool {
+	select {
+	case <-b.closing:
+		return true
+	default:
+		return false
+	}
+}
+
+func isClosedPipeReadError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "file already closed") || strings.Contains(msg, "use of closed file")
 }

@@ -78,6 +78,9 @@ Run the bridge:
 ```bash
 codex-acp-bridge
 codex-acp-bridge --name team-codex
+codex-acp-bridge --message-streaming
+codex-acp-bridge --reasoning-thoughts=both
+codex-acp-bridge --reasoning-streaming=false
 codex-acp-bridge --debug
 ```
 
@@ -85,6 +88,12 @@ Flags:
 
 - `--name`: ACP agent name exposed via `initialize.agentInfo.name`.
   Default: `norma-codex-acp-bridge`.
+- `--message-streaming`: Stream app-server `agentMessage` deltas as ACP `agent_message_chunk` updates.
+  Default: `false`.
+- `--reasoning-streaming`: Stream app-server reasoning deltas live when enabled; when disabled, emit final thought chunks from completed reasoning items only.
+  Default: `true`.
+- `--reasoning-thoughts`: Reasoning lane to project as ACP thoughts: `off`, `summary`, `content`, or `both`.
+  Default: `summary`.
 - `--debug`: Enable debug logging.
 
 If tools are installed globally:

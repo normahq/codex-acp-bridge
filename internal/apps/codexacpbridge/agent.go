@@ -16,16 +16,22 @@ import (
 )
 
 const (
-	decisionAccept           = "accept"
-	decisionAcceptForSession = "acceptForSession"
-	decisionDecline          = "decline"
-	decisionCancel           = "cancel"
-	decisionApproved         = "approved"
-	decisionApprovedSession  = "approved_for_session"
-	decisionDenied           = "denied"
-	decisionAbort            = "abort"
-	mcpContractMerge         = "merge"
-	methodTurnStarted        = "turn/started"
+	decisionAccept                  = "accept"
+	decisionAcceptForSession        = "acceptForSession"
+	decisionDecline                 = "decline"
+	decisionCancel                  = "cancel"
+	decisionApproved                = "approved"
+	decisionApprovedSession         = "approved_for_session"
+	decisionDenied                  = "denied"
+	decisionAbort                   = "abort"
+	mcpContractMerge                = "merge"
+	methodTurnStarted               = "turn/started"
+	methodItemStarted               = "item/started"
+	methodItemCompleted             = "item/completed"
+	methodAgentMessageDelta         = "item/agentMessage/delta"
+	methodReasoningTextDelta        = "item/reasoning/textDelta"
+	methodReasoningSummaryTextDelta = "item/reasoning/summaryTextDelta"
+	methodReasoningSummaryPartAdded = "item/reasoning/summaryPartAdded"
 
 	sessionConfigIDReasoningEffort       = "reasoning_effort"
 	sessionConfigCategoryThoughtLevel    = "thought_level"
@@ -35,6 +41,15 @@ const (
 	sessionConfigOptionValueUnsupported  = "session config option value is not supported"
 	sessionConfigOptionIDUnsupported     = "session config option is not supported"
 	sessionConfigOptionReasoningRequired = "reasoning effort must be a string value"
+
+	metaItemIDKey        = "codex-acp-bridge/itemId"
+	metaCompletedKey     = "codex-acp-bridge/completed"
+	metaPhaseKey         = "codex-acp-bridge/phase"
+	metaReasoningKindKey = "codex-acp-bridge/reasoningKind"
+	metaSummaryIndexKey  = "codex-acp-bridge/summaryIndex"
+	metaContentIndexKey  = "codex-acp-bridge/contentIndex"
+	reasoningKindSummary = "summary"
+	reasoningKindContent = "content"
 )
 
 type codexACPConnection interface {
@@ -46,9 +61,12 @@ type codexACPProxyAgent struct {
 	agentName    string
 	agentVersion string
 
-	defaultConfig  codexAppConfig
-	sessionFactory appServerBackendFactory
-	logger         *zerolog.Logger
+	defaultConfig      codexAppConfig
+	sessionFactory     appServerBackendFactory
+	logger             *zerolog.Logger
+	messageStreaming   bool
+	reasoningStreaming bool
+	reasoningThoughts  string
 
 	connMu sync.RWMutex
 	conn   codexACPConnection
@@ -62,6 +80,28 @@ type promptCompletion struct {
 	stopReason acp.StopReason
 	usage      map[string]any
 	err        error
+}
+
+type agentMessageItemState struct {
+	phase      string
+	phaseKnown bool
+	streamed   bool
+}
+
+type reasoningLaneState struct {
+	index    int64
+	open     bool
+	streamed bool
+	hasText  bool
+}
+
+type reasoningItemState struct {
+	summary reasoningLaneState
+	content reasoningLaneState
+}
+
+type planItemState struct {
+	text string
 }
 
 type codexProxySessionState struct {
@@ -81,11 +121,13 @@ type codexProxySessionState struct {
 
 	workerCancel context.CancelFunc
 
-	agentMessageDeltaByItem map[string]string
-	planDeltaByItem         map[string]string
-	pendingRequests         map[string]string
-	latestRateLimits        map[string]any
-	latestUsage             map[string]any
+	agentMessageItems map[string]agentMessageItemState
+	reasoningItems    map[string]reasoningItemState
+	planItems         map[string]planItemState
+	planOrder         []string
+	pendingRequests   map[string]string
+	latestRateLimits  map[string]any
+	latestUsage       map[string]any
 }
 
 type sessionMCPStartup struct {
@@ -105,13 +147,21 @@ func newCodexACPProxyAgent(
 	}
 	version := DefaultAgentVersion
 	return &codexACPProxyAgent{
-		agentName:      name,
-		agentVersion:   version,
-		defaultConfig:  defaultConfig.withModel(defaultConfig.Model),
-		sessionFactory: sessionFactory,
-		logger:         logger,
-		sessions:       make(map[acp.SessionId]*codexProxySessionState),
+		agentName:          name,
+		agentVersion:       version,
+		defaultConfig:      defaultConfig.withModel(defaultConfig.Model),
+		sessionFactory:     sessionFactory,
+		logger:             logger,
+		reasoningStreaming: true,
+		reasoningThoughts:  defaultReasoningThoughts,
+		sessions:           make(map[acp.SessionId]*codexProxySessionState),
 	}
+}
+
+func (a *codexACPProxyAgent) setBridgeOptions(opts Options) {
+	a.messageStreaming = opts.MessageStreaming
+	a.reasoningStreaming = opts.reasoningStreamingEnabled()
+	a.reasoningThoughts = opts.reasoningThoughtsMode()
 }
 
 func (a *codexACPProxyAgent) setConnection(conn codexACPConnection) {
@@ -333,8 +383,10 @@ func (a *codexACPProxyAgent) Prompt(ctx context.Context, params acp.PromptReques
 	a.mu.Lock()
 	if current := a.sessions[params.SessionId]; current != nil {
 		current.turnID = turnID
-		current.agentMessageDeltaByItem = make(map[string]string)
-		current.planDeltaByItem = make(map[string]string)
+		current.agentMessageItems = make(map[string]agentMessageItemState)
+		current.reasoningItems = make(map[string]reasoningItemState)
+		current.planItems = make(map[string]planItemState)
+		current.planOrder = nil
 		current.pendingRequests = make(map[string]string)
 		current.latestUsage = nil
 	}
@@ -955,7 +1007,6 @@ func (a *codexACPProxyAgent) handleNotification(
 			return true, acp.StopReasonRefusal, usageFromTokenNotification(params), nil
 		}
 	case "thread/status/changed":
-	case "item/reasoning/summaryPartAdded":
 	case "turn/diff/updated":
 	case methodTurnStarted:
 		turn := mapValue(params, "turn")
@@ -964,19 +1015,30 @@ func (a *codexACPProxyAgent) handleNotification(
 			a.syncTurnID(sessionID, startedTurnID)
 		}
 		a.resetTurnState(sessionID)
-	case "item/agentMessage/delta":
+	case methodAgentMessageDelta:
+		if !a.messageStreaming {
+			return false, "", nil, nil
+		}
 		itemID := stringValue(params, "itemId")
 		delta := rawStringValue(params, "delta")
 		if itemID == "" || delta == "" {
 			return false, "", nil, nil
 		}
-		a.appendAgentMessageDelta(sessionID, itemID, delta)
-	case "item/reasoning/textDelta", "item/reasoning/summaryTextDelta":
-		delta := rawStringValue(params, "delta")
-		if delta == "" {
+		if err := a.sendAgentMessageDelta(ctx, sessionID, itemID, delta); err != nil {
+			return false, "", nil, err
+		}
+	case methodReasoningTextDelta, methodReasoningSummaryTextDelta:
+		if !a.reasoningStreaming || !a.reasoningThoughtsEnabled() {
 			return false, "", nil, nil
 		}
-		if err := a.sendUpdate(ctx, sessionID, acp.UpdateAgentThoughtText(delta)); err != nil {
+		if err := a.handleReasoningDelta(ctx, sessionID, note.Method, params); err != nil {
+			return false, "", nil, err
+		}
+	case methodReasoningSummaryPartAdded:
+		if !a.reasoningStreaming || !a.reasoningThoughtsIncludeSummary() {
+			return false, "", nil, nil
+		}
+		if err := a.handleReasoningSummaryPartAdded(ctx, sessionID, params); err != nil {
 			return false, "", nil, err
 		}
 	case "item/plan/delta":
@@ -985,25 +1047,20 @@ func (a *codexACPProxyAgent) handleNotification(
 		if itemID == "" || delta == "" {
 			return false, "", nil, nil
 		}
-		aggregated := a.appendPlanDelta(sessionID, itemID, delta)
-		if strings.TrimSpace(aggregated) == "" {
+		entries := a.appendPlanDelta(sessionID, itemID, delta)
+		if len(entries) == 0 {
 			return false, "", nil, nil
 		}
-		if err := a.sendUpdate(ctx, sessionID, acp.UpdatePlan(acp.PlanEntry{
-			Content:  aggregated,
-			Priority: acp.PlanEntryPriorityMedium,
-			Status:   acp.PlanEntryStatusInProgress,
-		})); err != nil {
+		if err := a.sendUpdate(ctx, sessionID, acp.UpdatePlan(entries...)); err != nil {
 			return false, "", nil, err
 		}
 	case "turn/plan/updated":
 		entries := planEntriesFromNotification(params)
-		if len(entries) > 0 {
-			if err := a.sendUpdate(ctx, sessionID, acp.UpdatePlan(entries...)); err != nil {
-				return false, "", nil, err
-			}
+		a.resetPlanPreviewState(sessionID)
+		if err := a.sendUpdate(ctx, sessionID, acp.UpdatePlan(entries...)); err != nil {
+			return false, "", nil, err
 		}
-	case "item/started":
+	case methodItemStarted:
 		item := mapValue(params, "item")
 		if len(item) == 0 {
 			return false, "", nil, nil
@@ -1011,6 +1068,14 @@ func (a *codexACPProxyAgent) handleNotification(
 		itemType := stringValue(item, "type")
 		itemID := stringValue(item, "id")
 		if itemType == "" || itemID == "" {
+			return false, "", nil, nil
+		}
+		if itemType == "agentMessage" {
+			a.noteAgentMessageStarted(sessionID, item)
+			return false, "", nil, nil
+		}
+		if itemType == "reasoning" {
+			a.noteReasoningStarted(sessionID, item)
 			return false, "", nil, nil
 		}
 		if !isToolLifecycleItemType(itemType) {
@@ -1027,7 +1092,7 @@ func (a *codexACPProxyAgent) handleNotification(
 		if err := a.sendUpdate(ctx, sessionID, update); err != nil {
 			return false, "", nil, err
 		}
-	case "item/completed":
+	case methodItemCompleted:
 		item := mapValue(params, "item")
 		if len(item) == 0 {
 			return false, "", nil, nil
@@ -1035,6 +1100,18 @@ func (a *codexACPProxyAgent) handleNotification(
 		itemType := stringValue(item, "type")
 		if itemType == "agentMessage" {
 			if err := a.handleCompletedAgentMessage(ctx, sessionID, item); err != nil {
+				return false, "", nil, err
+			}
+			return false, "", nil, nil
+		}
+		if itemType == "reasoning" {
+			if err := a.handleCompletedReasoning(ctx, sessionID, item); err != nil {
+				return false, "", nil, err
+			}
+			return false, "", nil, nil
+		}
+		if itemType == "plan" {
+			if err := a.handleCompletedPlan(ctx, sessionID, item); err != nil {
 				return false, "", nil, err
 			}
 			return false, "", nil, nil
@@ -1795,11 +1872,11 @@ func requiresActiveTurn(method string) bool {
 		return true
 	case methodTurnStarted:
 		return true
-	case "item/agentMessage/delta":
+	case methodAgentMessageDelta:
 		return true
-	case "item/reasoning/textDelta", "item/reasoning/summaryTextDelta":
+	case methodReasoningTextDelta, methodReasoningSummaryTextDelta:
 		return true
-	case "item/reasoning/summaryPartAdded":
+	case methodReasoningSummaryPartAdded:
 		return true
 	case "item/plan/delta":
 		return true
@@ -2036,39 +2113,374 @@ func (a *codexACPProxyAgent) resetTurnState(sessionID acp.SessionId) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if state := a.sessions[sessionID]; state != nil {
-		state.agentMessageDeltaByItem = make(map[string]string)
-		state.planDeltaByItem = make(map[string]string)
+		state.agentMessageItems = make(map[string]agentMessageItemState)
+		state.reasoningItems = make(map[string]reasoningItemState)
+		state.planItems = make(map[string]planItemState)
+		state.planOrder = nil
 		state.pendingRequests = make(map[string]string)
 		state.latestUsage = nil
 	}
 }
 
-func (a *codexACPProxyAgent) appendAgentMessageDelta(sessionID acp.SessionId, itemID string, delta string) {
+func optionalRawStringValue(m map[string]any, key string) (string, bool) {
+	if m == nil {
+		return "", false
+	}
+	v, ok := m[key]
+	if !ok || v == nil {
+		return "", false
+	}
+	s, ok := v.(string)
+	if !ok {
+		return "", false
+	}
+	return s, true
+}
+
+func (a *codexACPProxyAgent) reasoningThoughtsEnabled() bool {
+	return a.reasoningThoughts != reasoningThoughtsOff
+}
+
+func (a *codexACPProxyAgent) reasoningThoughtsIncludeSummary() bool {
+	return a.reasoningThoughts == reasoningThoughtsSummary || a.reasoningThoughts == reasoningThoughtsBoth
+}
+
+func (a *codexACPProxyAgent) reasoningThoughtsIncludeContent() bool {
+	return a.reasoningThoughts == reasoningThoughtsContent || a.reasoningThoughts == reasoningThoughtsBoth
+}
+
+func (a *codexACPProxyAgent) noteAgentMessageStarted(sessionID acp.SessionId, item map[string]any) {
+	itemID := stringValue(item, "id")
+	if itemID == "" {
+		return
+	}
+	phase, phaseKnown := optionalRawStringValue(item, "phase")
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	state := a.sessions[sessionID]
 	if state == nil {
 		return
 	}
-	if state.agentMessageDeltaByItem == nil {
-		state.agentMessageDeltaByItem = make(map[string]string)
+	if state.agentMessageItems == nil {
+		state.agentMessageItems = make(map[string]agentMessageItemState)
 	}
-	state.agentMessageDeltaByItem[itemID] += delta
+	itemState := state.agentMessageItems[itemID]
+	if phaseKnown {
+		itemState.phase = phase
+		itemState.phaseKnown = true
+	}
+	state.agentMessageItems[itemID] = itemState
 }
 
-func (a *codexACPProxyAgent) agentMessageDelta(sessionID acp.SessionId, itemID string) string {
+func (a *codexACPProxyAgent) noteReasoningStarted(sessionID acp.SessionId, item map[string]any) {
+	itemID := stringValue(item, "id")
+	if itemID == "" {
+		return
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	state := a.sessions[sessionID]
-	if state == nil || state.agentMessageDeltaByItem == nil {
-		return ""
+	if state == nil {
+		return
 	}
-	return state.agentMessageDeltaByItem[itemID]
+	if state.reasoningItems == nil {
+		state.reasoningItems = make(map[string]reasoningItemState)
+	}
+	if _, ok := state.reasoningItems[itemID]; !ok {
+		state.reasoningItems[itemID] = reasoningItemState{}
+	}
+}
+
+func (a *codexACPProxyAgent) markAgentMessageStreamed(sessionID acp.SessionId, itemID string) agentMessageItemState {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	state := a.sessions[sessionID]
+	if state == nil {
+		return agentMessageItemState{}
+	}
+	if state.agentMessageItems == nil {
+		state.agentMessageItems = make(map[string]agentMessageItemState)
+	}
+	itemState := state.agentMessageItems[itemID]
+	itemState.streamed = true
+	state.agentMessageItems[itemID] = itemState
+	return itemState
+}
+
+func (a *codexACPProxyAgent) completeAgentMessageState(sessionID acp.SessionId, itemID string, phase string, phaseKnown bool) agentMessageItemState {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	state := a.sessions[sessionID]
+	if state == nil {
+		return agentMessageItemState{}
+	}
+	itemState := state.agentMessageItems[itemID]
+	if phaseKnown {
+		itemState.phase = phase
+		itemState.phaseKnown = true
+	}
+	delete(state.agentMessageItems, itemID)
+	return itemState
+}
+
+func (a *codexACPProxyAgent) advanceReasoningLane(sessionID acp.SessionId, itemID string, kind string, index int64, streamed bool) (int64, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	state := a.sessions[sessionID]
+	if state == nil {
+		return 0, false
+	}
+	if state.reasoningItems == nil {
+		state.reasoningItems = make(map[string]reasoningItemState)
+	}
+	itemState := state.reasoningItems[itemID]
+	var lane reasoningLaneState
+	switch kind {
+	case reasoningKindSummary:
+		lane = itemState.summary
+	case reasoningKindContent:
+		lane = itemState.content
+	default:
+		return 0, false
+	}
+	previousIndex := lane.index
+	shouldClose := lane.open && lane.index != index && lane.hasText
+	if !lane.open || lane.index != index {
+		lane.index = index
+		lane.open = true
+		lane.hasText = false
+	}
+	if streamed {
+		lane.streamed = true
+		lane.hasText = true
+	}
+	switch kind {
+	case reasoningKindSummary:
+		itemState.summary = lane
+	case reasoningKindContent:
+		itemState.content = lane
+	}
+	state.reasoningItems[itemID] = itemState
+	return previousIndex, shouldClose
+}
+
+func (a *codexACPProxyAgent) completeReasoningState(sessionID acp.SessionId, itemID string) reasoningItemState {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	state := a.sessions[sessionID]
+	if state == nil {
+		return reasoningItemState{}
+	}
+	itemState := state.reasoningItems[itemID]
+	delete(state.reasoningItems, itemID)
+	return itemState
+}
+
+func reasoningThoughtChunkMeta(itemID string, kind string, index int64, completed bool) map[string]any {
+	meta := map[string]any{
+		metaCompletedKey: completed,
+	}
+	if itemID != "" {
+		meta[metaItemIDKey] = itemID
+	}
+	switch kind {
+	case reasoningKindSummary:
+		meta[metaReasoningKindKey] = reasoningKindSummary
+		meta[metaSummaryIndexKey] = index
+	case reasoningKindContent:
+		meta[metaReasoningKindKey] = reasoningKindContent
+		meta[metaContentIndexKey] = index
+	}
+	return meta
+}
+
+func reasoningThoughtChunkUpdate(text string, itemID string, kind string, index int64, completed bool) acp.SessionUpdate {
+	return acp.SessionUpdate{
+		AgentThoughtChunk: &acp.SessionUpdateAgentThoughtChunk{
+			Meta:          reasoningThoughtChunkMeta(itemID, kind, index, completed),
+			Content:       acp.TextBlock(text),
+			SessionUpdate: "agent_thought_chunk",
+		},
+	}
+}
+
+func (a *codexACPProxyAgent) sendReasoningChunk(ctx context.Context, sessionID acp.SessionId, text string, itemID string, kind string, index int64, completed bool) error {
+	return a.sendUpdate(ctx, sessionID, reasoningThoughtChunkUpdate(text, itemID, kind, index, completed))
+}
+
+func (a *codexACPProxyAgent) handleReasoningDelta(ctx context.Context, sessionID acp.SessionId, method string, params map[string]any) error {
+	delta := rawStringValue(params, "delta")
+	itemID := stringValue(params, "itemId")
+	if itemID == "" || delta == "" {
+		return nil
+	}
+	var (
+		kind  string
+		index int64
+		ok    bool
+	)
+	switch method {
+	case methodReasoningSummaryTextDelta:
+		if !a.reasoningThoughtsIncludeSummary() {
+			return nil
+		}
+		kind = reasoningKindSummary
+		index, ok = int64Value(params, "summaryIndex")
+	case methodReasoningTextDelta:
+		if !a.reasoningThoughtsIncludeContent() {
+			return nil
+		}
+		kind = reasoningKindContent
+		index, ok = int64Value(params, "contentIndex")
+	default:
+		return nil
+	}
+	if !ok {
+		return nil
+	}
+	previousIndex, shouldClose := a.advanceReasoningLane(sessionID, itemID, kind, index, true)
+	if shouldClose {
+		if err := a.sendReasoningChunk(ctx, sessionID, "", itemID, kind, previousIndex, true); err != nil {
+			return err
+		}
+	}
+	return a.sendReasoningChunk(ctx, sessionID, delta, itemID, kind, index, false)
+}
+
+func (a *codexACPProxyAgent) handleReasoningSummaryPartAdded(ctx context.Context, sessionID acp.SessionId, params map[string]any) error {
+	itemID := stringValue(params, "itemId")
+	index, ok := int64Value(params, "summaryIndex")
+	if itemID == "" || !ok {
+		return nil
+	}
+	previousIndex, shouldClose := a.advanceReasoningLane(sessionID, itemID, reasoningKindSummary, index, false)
+	if !shouldClose {
+		return nil
+	}
+	return a.sendReasoningChunk(ctx, sessionID, "", itemID, reasoningKindSummary, previousIndex, true)
+}
+
+func reasoningItemTexts(item map[string]any, key string) []string {
+	values := listValue(item, key)
+	if len(values) == 0 {
+		return nil
+	}
+	texts := make([]string, 0, len(values))
+	for _, value := range values {
+		text, ok := value.(string)
+		if !ok {
+			continue
+		}
+		texts = append(texts, text)
+	}
+	return texts
+}
+
+func (a *codexACPProxyAgent) emitCompletedReasoningTexts(ctx context.Context, sessionID acp.SessionId, itemID string, kind string, texts []string) error {
+	for index, text := range texts {
+		if text == "" {
+			continue
+		}
+		if err := a.sendReasoningChunk(ctx, sessionID, text, itemID, kind, int64(index), true); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *codexACPProxyAgent) handleCompletedReasoning(ctx context.Context, sessionID acp.SessionId, item map[string]any) error {
+	itemID := stringValue(item, "id")
+	if itemID == "" {
+		return nil
+	}
+	state := a.completeReasoningState(sessionID, itemID)
+	if !a.reasoningThoughtsEnabled() {
+		return nil
+	}
+	summaryTexts := reasoningItemTexts(item, "summary")
+	contentTexts := reasoningItemTexts(item, "content")
+	if a.reasoningStreaming {
+		if a.reasoningThoughtsIncludeSummary() {
+			if state.summary.hasText {
+				if err := a.sendReasoningChunk(ctx, sessionID, "", itemID, reasoningKindSummary, state.summary.index, true); err != nil {
+					return err
+				}
+			} else if !state.summary.streamed {
+				if err := a.emitCompletedReasoningTexts(ctx, sessionID, itemID, reasoningKindSummary, summaryTexts); err != nil {
+					return err
+				}
+			}
+		}
+		if a.reasoningThoughtsIncludeContent() {
+			if state.content.hasText {
+				if err := a.sendReasoningChunk(ctx, sessionID, "", itemID, reasoningKindContent, state.content.index, true); err != nil {
+					return err
+				}
+			} else if !state.content.streamed {
+				if err := a.emitCompletedReasoningTexts(ctx, sessionID, itemID, reasoningKindContent, contentTexts); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if a.reasoningThoughtsIncludeSummary() {
+		if err := a.emitCompletedReasoningTexts(ctx, sessionID, itemID, reasoningKindSummary, summaryTexts); err != nil {
+			return err
+		}
+	}
+	if a.reasoningThoughtsIncludeContent() {
+		if err := a.emitCompletedReasoningTexts(ctx, sessionID, itemID, reasoningKindContent, contentTexts); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func agentMessageChunkMeta(itemID string, completed bool, phase string, phaseKnown bool) map[string]any {
+	meta := map[string]any{
+		metaCompletedKey: completed,
+	}
+	if itemID != "" {
+		meta[metaItemIDKey] = itemID
+	}
+	if phaseKnown {
+		meta[metaPhaseKey] = phase
+	}
+	return meta
+}
+
+func agentMessageChunkUpdate(text string, itemID string, completed bool, phase string, phaseKnown bool) acp.SessionUpdate {
+	return acp.SessionUpdate{
+		AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{
+			Meta:          agentMessageChunkMeta(itemID, completed, phase, phaseKnown),
+			Content:       acp.TextBlock(text),
+			SessionUpdate: "agent_message_chunk",
+		},
+	}
+}
+
+func (a *codexACPProxyAgent) sendAgentMessageDelta(ctx context.Context, sessionID acp.SessionId, itemID string, delta string) error {
+	itemState := a.markAgentMessageStreamed(sessionID, itemID)
+	return a.sendUpdate(ctx, sessionID, agentMessageChunkUpdate(delta, itemID, false, itemState.phase, itemState.phaseKnown))
 }
 
 func (a *codexACPProxyAgent) handleCompletedAgentMessage(ctx context.Context, sessionID acp.SessionId, item map[string]any) error {
 	itemID := stringValue(item, "id")
-	phase := rawStringValue(item, "phase")
+	phase, phaseKnown := optionalRawStringValue(item, "phase")
+	text := rawStringValue(item, "text")
+	if a.messageStreaming {
+		itemState := a.completeAgentMessageState(sessionID, itemID, phase, phaseKnown)
+		if !phaseKnown && itemState.phaseKnown {
+			phase = itemState.phase
+			phaseKnown = true
+		}
+		if itemState.streamed {
+			return a.sendUpdate(ctx, sessionID, agentMessageChunkUpdate("", itemID, true, phase, phaseKnown))
+		}
+		return a.sendUpdate(ctx, sessionID, agentMessageChunkUpdate(text, itemID, true, phase, phaseKnown))
+	}
+
 	if phase == "commentary" {
 		return nil
 	}
@@ -2081,29 +2493,106 @@ func (a *codexACPProxyAgent) handleCompletedAgentMessage(ctx context.Context, se
 		}
 		return nil
 	}
-
-	text := rawStringValue(item, "text")
-	if text == "" && itemID != "" {
-		text = a.agentMessageDelta(sessionID, itemID)
-	}
 	if text == "" {
 		return nil
 	}
 	return a.sendUpdate(ctx, sessionID, acp.UpdateAgentMessageText(text))
 }
 
-func (a *codexACPProxyAgent) appendPlanDelta(sessionID acp.SessionId, itemID string, delta string) string {
+func planPreviewEntries(order []string, items map[string]planItemState) []acp.PlanEntry {
+	if len(order) == 0 || len(items) == 0 {
+		return nil
+	}
+	entries := make([]acp.PlanEntry, 0, len(order))
+	for _, itemID := range order {
+		itemState, ok := items[itemID]
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(itemState.text) == "" {
+			continue
+		}
+		entries = append(entries, acp.PlanEntry{
+			Content:  itemState.text,
+			Priority: acp.PlanEntryPriorityMedium,
+			Status:   acp.PlanEntryStatusInProgress,
+		})
+	}
+	return entries
+}
+
+func (a *codexACPProxyAgent) appendPlanDelta(sessionID acp.SessionId, itemID string, delta string) []acp.PlanEntry {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	state := a.sessions[sessionID]
 	if state == nil {
-		return delta
+		if strings.TrimSpace(delta) == "" {
+			return nil
+		}
+		return []acp.PlanEntry{{
+			Content:  delta,
+			Priority: acp.PlanEntryPriorityMedium,
+			Status:   acp.PlanEntryStatusInProgress,
+		}}
 	}
-	if state.planDeltaByItem == nil {
-		state.planDeltaByItem = make(map[string]string)
+	if state.planItems == nil {
+		state.planItems = make(map[string]planItemState)
 	}
-	state.planDeltaByItem[itemID] += delta
-	return state.planDeltaByItem[itemID]
+	if _, ok := state.planItems[itemID]; !ok {
+		state.planOrder = append(state.planOrder, itemID)
+	}
+	itemState := state.planItems[itemID]
+	itemState.text += delta
+	state.planItems[itemID] = itemState
+	return planPreviewEntries(state.planOrder, state.planItems)
+}
+
+func (a *codexACPProxyAgent) setCompletedPlanItem(sessionID acp.SessionId, itemID string, text string) []acp.PlanEntry {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	state := a.sessions[sessionID]
+	if state == nil {
+		if strings.TrimSpace(text) == "" {
+			return nil
+		}
+		return []acp.PlanEntry{{
+			Content:  text,
+			Priority: acp.PlanEntryPriorityMedium,
+			Status:   acp.PlanEntryStatusInProgress,
+		}}
+	}
+	if state.planItems == nil {
+		state.planItems = make(map[string]planItemState)
+	}
+	if _, ok := state.planItems[itemID]; !ok {
+		state.planOrder = append(state.planOrder, itemID)
+	}
+	state.planItems[itemID] = planItemState{text: text}
+	return planPreviewEntries(state.planOrder, state.planItems)
+}
+
+func (a *codexACPProxyAgent) resetPlanPreviewState(sessionID acp.SessionId) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	state := a.sessions[sessionID]
+	if state == nil {
+		return
+	}
+	state.planItems = make(map[string]planItemState)
+	state.planOrder = nil
+}
+
+func (a *codexACPProxyAgent) handleCompletedPlan(ctx context.Context, sessionID acp.SessionId, item map[string]any) error {
+	itemID := stringValue(item, "id")
+	text := rawStringValue(item, "text")
+	if itemID == "" || strings.TrimSpace(text) == "" {
+		return nil
+	}
+	entries := a.setCompletedPlanItem(sessionID, itemID, text)
+	if len(entries) == 0 {
+		return nil
+	}
+	return a.sendUpdate(ctx, sessionID, acp.UpdatePlan(entries...))
 }
 
 func (a *codexACPProxyAgent) setSessionRateLimits(sessionID acp.SessionId, rateLimits map[string]any) {

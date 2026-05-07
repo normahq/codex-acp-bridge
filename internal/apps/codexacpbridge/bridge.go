@@ -53,7 +53,7 @@ func RunProxy(ctx context.Context, workingDir string, opts Options, stdin io.Rea
 		Msg("starting codex acp bridge")
 
 	sessionFactory := func(factoryCtx context.Context, sessionCWD string) (appServerSession, error) {
-		return connectAppServerBackend(factoryCtx, workingDir, sessionCWD, command, bridgeClientName, lockedStderr, logger)
+		return connectAppServerBackend(factoryCtx, workingDir, sessionCWD, command, bridgeClientName, lockedStderr, logger, opts)
 	}
 	identity, err := validateAppServerFactory(ctx, sessionFactory, workingDir)
 	if err != nil {
@@ -67,6 +67,7 @@ func RunProxy(ctx context.Context, workingDir string, opts Options, stdin io.Rea
 		Msg("resolved acp agent identity")
 
 	proxy := newCodexACPProxyAgent(sessionFactory, agentName, opts.appConfig(), logger)
+	proxy.setBridgeOptions(opts)
 	proxy.setAgentVersion(agentVersion)
 	conn := acp.NewAgentSideConnection(proxy, stdout, stdin)
 	conn.SetLogger(slog.New(slog.NewTextHandler(io.Discard, nil)))

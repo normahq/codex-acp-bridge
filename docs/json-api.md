@@ -39,13 +39,24 @@ This document does not require backend source internals; it documents observable
 - Preserve `item/*/outputDelta` text exactly as received when forwarding ACP tool call updates.
 - Do not trim, collapse, or normalize whitespace in message deltas or completed text.
 - Treat `item/completed` payload as authoritative final state for that item.
-- Do not project `agentMessage.phase=commentary` into ACP message or thought output.
+- When message streaming is disabled, do not project `agentMessage.phase=commentary` into ACP output.
 
 ## ACP projection (normative)
 
 The adapter should project Codex backend events into ACP session semantics as follows.
 
-`session/update.agent_thought_chunk` is reserved for reasoning text deltas (`item/reasoning/textDelta`, `item/reasoning/summaryTextDelta`) only.
+`session/update.agent_thought_chunk` is reserved for reasoning output only. The bridge can project the readable `summary` lane, the raw `content` lane, or both, and preserves that distinction in `_meta`. When `--reasoning-streaming=true`, selected lanes stream from reasoning delta notifications; when `--reasoning-streaming=false`, selected lanes are emitted from completed reasoning items only. `--reasoning-thoughts=off` disables thought output entirely.
+
+### Initialize negotiation
+
+The bridge always sets `initialize.capabilities.experimentalApi=true`.
+
+Notification opt-outs depend on bridge flags:
+- `--message-streaming=false` -> opt out `item/agentMessage/delta`
+- `--reasoning-streaming=false` -> opt out `item/reasoning/textDelta`, `item/reasoning/summaryTextDelta`, `item/reasoning/summaryPartAdded`
+- `--reasoning-thoughts=summary` -> additionally opt out `item/reasoning/textDelta`
+- `--reasoning-thoughts=content` -> additionally opt out `item/reasoning/summaryTextDelta`, `item/reasoning/summaryPartAdded`
+- `--reasoning-thoughts=off` -> opt out all reasoning delta notifications regardless of `--reasoning-streaming`
 
 ### Core notification mapping
 
@@ -54,18 +65,18 @@ The adapter should project Codex backend events into ACP session semantics as fo
 | `thread/started` | `thread` | session/thread started metadata | Use `thread.id` as backend thread handle. |
 | `thread/status/changed` | `threadId,status` | no ACP streaming update | Recognized operational status. No ACP-native status stream is emitted. |
 | `turn/started` | `threadId,turn` | turn started | Keep `turn.id` for correlation. |
-| `item/started` | `threadId,turnId,item` | item lifecycle started | Emits ACP tool-call lifecycle only for tool-like item types. Non-tool items such as `reasoning`, `plan`, and `agentMessage` are ignored here. |
-| `item/agentMessage/delta` | `threadId,turnId,itemId,delta` | buffer only | Append delta byte-for-byte by `itemId`; phase is not present on delta events, so projection waits for `item/completed`. |
-| `item/plan/delta` | `threadId,turnId,itemId,delta` | `session/update.plan` | Aggregates deltas by `itemId`; plan deltas are not thoughts. |
-| `item/reasoning/textDelta` | `threadId,turnId,itemId,contentIndex,delta` | `session/update.agent_thought_chunk` | Preserve index ordering. |
-| `item/reasoning/summaryPartAdded` | `threadId,turnId,itemId,summaryIndex` | no ACP streaming update | Structural marker only; no text payload to project. |
-| `item/reasoning/summaryTextDelta` | `threadId,turnId,itemId,summaryIndex,delta` | `session/update.agent_thought_chunk` | Append by summary index. |
+| `item/started` | `threadId,turnId,item` | item lifecycle started | Emits ACP tool-call lifecycle only for tool-like item types. When message streaming is enabled, `agentMessage` items are tracked here by `item.id` and started `phase`. |
+| `item/agentMessage/delta` | `threadId,turnId,itemId,delta` | `session/update.agent_message_chunk` when message streaming is enabled | Stream each delta immediately with `_meta["codex-acp-bridge/itemId"]`, `_meta["codex-acp-bridge/completed"]=false`, and `_meta["codex-acp-bridge/phase"]` when known. When message streaming is disabled, the bridge opts this notification out at initialize. |
+| `item/plan/delta` | `threadId,turnId,itemId,delta` | `session/update.plan` | Preview-only input. The bridge aggregates draft text by `itemId` and emits a full ACP plan replacement built from all known plan preview items. |
+| `item/reasoning/textDelta` | `threadId,turnId,itemId,contentIndex,delta` | `session/update.agent_thought_chunk` when `--reasoning-streaming=true` and the selected lane includes `content` | Emits raw reasoning chunks with `_meta["codex-acp-bridge/reasoningKind"]="content"` and `_meta["codex-acp-bridge/contentIndex"]`. A changed `contentIndex` closes the previous raw block. |
+| `item/reasoning/summaryPartAdded` | `threadId,turnId,itemId,summaryIndex` | no standalone ACP update | Structural marker only. In summary streaming, a new `summaryIndex` closes the previous open summary section. |
+| `item/reasoning/summaryTextDelta` | `threadId,turnId,itemId,summaryIndex,delta` | `session/update.agent_thought_chunk` when `--reasoning-streaming=true` and the selected lane includes `summary` | Emits readable reasoning summary chunks with `_meta["codex-acp-bridge/reasoningKind"]="summary"` and `_meta["codex-acp-bridge/summaryIndex"]`. |
 | `item/commandExecution/outputDelta` | `threadId,turnId,itemId,delta` | `session/update.tool_call_update` | Text output chunk for command item. |
 | `item/fileChange/outputDelta` | `threadId,turnId,itemId,delta` | `session/update.tool_call_update` | Streaming patch preview/update. |
 | `item/fileChange/patchUpdated` | `threadId,turnId,itemId,changes` | `session/update.tool_call_update` | Joins `changes[].diff` as tool content and preserves raw output. |
 | `item/mcpToolCall/progress` | `threadId,turnId,itemId,message` | `session/update.tool_call_update` | Progress text. |
-| `item/completed` | `threadId,turnId,item` | item lifecycle completed | Finalizes ACP tool-call lifecycle for tool-like item types. For `agentMessage`, projects accumulated `item.text` by phase: missing/null/empty or `final_answer` -> `session/update.agent_message_chunk`; `commentary` -> no ACP output. |
-| `turn/plan/updated` | `threadId,turnId,plan` | plan snapshot update | Snapshot; do not assume continuity with deltas. |
+| `item/completed` | `threadId,turnId,item` | item lifecycle completed | Finalizes ACP tool-call lifecycle for tool-like item types. For `agentMessage`, `item/completed` is always authoritative final state. When message streaming is enabled, it closes the logical `agent_message_chunk` stream with `_meta["codex-acp-bridge/completed"]=true` and emits `item.text` only when no deltas were streamed. When message streaming is disabled, visible phases (missing/null/empty or `final_answer`) project to `session/update.agent_message_chunk`; `commentary` stays hidden. For `reasoning`, completed items close any open streamed thought lane and, when `--reasoning-streaming=false`, emit one completed thought chunk per `summary[]` / `content[]` entry for the selected lanes. For `plan`, the completed item text replaces the draft text for that item and the bridge emits a full ACP plan replacement. |
+| `turn/plan/updated` | `threadId,turnId,plan` | plan snapshot update | Authoritative whole-plan snapshot. The bridge clears delta-derived preview state and emits the provided entries as the full ACP plan replacement, including an empty list when the snapshot is empty. |
 | `turn/diff/updated` | `threadId,turnId,diff` | no ACP streaming update | Diff is not emitted as thought/message/tool content. |
 | `thread/tokenUsage/updated` | `threadId,turnId,tokenUsage` | usage update | Forwards `tokenUsage.last.{inputTokens,outputTokens,totalTokens,cachedInputTokens}` into ACP meta usage (`cachedInputTokens` -> `cachedReadTokens`). |
 | `error` | `threadId,turnId,error,willRetry` | error event | If `willRetry=false`, finalize turn as failed/interrupted. |
@@ -103,11 +114,16 @@ ACP stop reason is derived from `turn.status`:
 
 Completed `agentMessage` items have the shape `{id,text,phase?}` plus optional metadata such as `memoryCitation`. `phase` uses Responses API wire values:
 
-- `commentary`: interim/preamble/progress assistant text. The bridge hides this from ACP output.
+- `commentary`: interim/preamble/progress assistant text. The bridge hides this from ACP output when message streaming is disabled; when message streaming is enabled, commentary is streamed as normal `agent_message_chunk` output with phase metadata.
 - `final_answer`: terminal answer text for that assistant message item. The bridge forwards this as ACP agent message text.
 - missing, null, or empty: phase unknown. The bridge preserves legacy compatibility by forwarding as ACP agent message text.
 
-`item/agentMessage/delta` does not include `phase`; clients must not infer whether a delta is commentary or final answer until the completed item arrives.
+`item/agentMessage/delta` does not include `phase`. When message streaming is enabled, the bridge carries the last known started/completed phase in `_meta["codex-acp-bridge/phase"]`.
+
+Message-streaming `_meta` keys:
+- `codex-acp-bridge/itemId`: app-server `agentMessage` item id
+- `codex-acp-bridge/completed`: `false` on streamed text deltas, `true` on the final closing chunk or on completed-only emission
+- `codex-acp-bridge/phase`: app-server message phase when known
 
 ### Server request mapping
 
@@ -148,9 +164,9 @@ For request types without a native ACP equivalent, the adapter uses ACP `session
 
 ### ACP streaming updates
 
-- Agent text: phase-visible completed `agentMessage` from `item/completed`.
-- Agent thoughts: `item/reasoning/textDelta`, `item/reasoning/summaryTextDelta`.
-- Plans: `item/plan/delta`, `turn/plan/updated`.
+- Agent text: either live `agentMessage` deltas plus completion when message streaming is enabled, or phase-visible completed `agentMessage` from `item/completed` when message streaming is disabled.
+- Agent thoughts: lane-selected reasoning output, streamed from deltas when `--reasoning-streaming=true` and otherwise projected from completed reasoning items.
+- Plans: native ACP `plan` only, sourced from `item/plan/delta`, completed `plan` items, and `turn/plan/updated`.
 - Tool calls: `item/started` and `item/completed` for tool-like item types only,
   `item/commandExecution/outputDelta`,
   `item/commandExecution/terminalInteraction`, `item/fileChange/outputDelta`,
@@ -301,7 +317,7 @@ mcpServer/elicitation/request
 ## Known pitfalls to avoid
 
 - Do not infer end-of-turn from last message chunk, `agentMessage.phase=final_answer`, item completion, tool completion, plan updates, or diff updates; wait for `turn/completed` unless terminal `error` with `willRetry=false` arrives.
-- Do not treat plan deltas as authoritative final plan text.
+- Do not treat plan deltas as authoritative final plan text; only completed `plan` items are authoritative per item, and `turn/plan/updated` is authoritative for whole-plan snapshots.
 - Do not emit `agentMessage.phase=commentary` as ACP message or thought output.
 - Do not mix connection-scoped `command/exec/outputDelta` with turn-scoped command item output.
 - Do not drop or rewrite whitespace in message or reasoning deltas.

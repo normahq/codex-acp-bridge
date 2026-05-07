@@ -8,6 +8,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -56,12 +59,14 @@ func (c *captureWriteCloser) writesSnapshot() [][]byte {
 func newTestBackend(writer io.WriteCloser) *appServerBackend {
 	logger := testNopLogger()
 	return &appServerBackend{
-		stdin:    writer,
-		logger:   logger,
-		pending:  make(map[string]chan appServerRPCResponse),
-		events:   make(chan appServerEvent, 16),
-		done:     make(chan struct{}),
-		readDone: make(chan struct{}),
+		stdin:               writer,
+		logger:              logger,
+		pending:             make(map[string]chan appServerRPCResponse),
+		events:              make(chan appServerEvent, 16),
+		closing:             make(chan struct{}),
+		done:                make(chan struct{}),
+		readDone:            make(chan struct{}),
+		shutdownGracePeriod: defaultBackendShutdownGracePeriod,
 	}
 }
 
@@ -222,6 +227,89 @@ func TestSendRequestResponseErrorAndNotification(t *testing.T) {
 	if got, want := payload["method"], "initialized"; got != want {
 		t.Fatalf("sendNotification method = %#v, want %q", got, want)
 	}
+}
+
+func TestAppServerInitializeParamsOptOutNotificationMethods(t *testing.T) {
+	t.Run("defaults opt out message deltas and raw reasoning deltas", func(t *testing.T) {
+		params := appServerInitializeParams("bridge", Options{})
+		caps, ok := params["capabilities"].(map[string]any)
+		if !ok {
+			t.Fatalf("capabilities type = %T, want map[string]any", params["capabilities"])
+		}
+		methods, ok := caps["optOutNotificationMethods"].([]string)
+		if !ok {
+			t.Fatalf("optOutNotificationMethods type = %T, want []string", caps["optOutNotificationMethods"])
+		}
+		want := []string{
+			methodAgentMessageDelta,
+			methodReasoningTextDelta,
+		}
+		if !slices.Equal(methods, want) {
+			t.Fatalf("optOutNotificationMethods = %#v, want %#v", methods, want)
+		}
+	})
+
+	t.Run("message streaming and reasoning final-only opt out all reasoning deltas", func(t *testing.T) {
+		opts := Options{MessageStreaming: true}
+		opts.SetReasoningStreaming(false)
+		params := appServerInitializeParams("bridge", opts)
+		caps, ok := params["capabilities"].(map[string]any)
+		if !ok {
+			t.Fatalf("capabilities type = %T, want map[string]any", params["capabilities"])
+		}
+		methods, ok := caps["optOutNotificationMethods"].([]string)
+		if !ok {
+			t.Fatalf("optOutNotificationMethods type = %T, want []string", caps["optOutNotificationMethods"])
+		}
+		want := []string{
+			methodReasoningTextDelta,
+			methodReasoningSummaryTextDelta,
+			methodReasoningSummaryPartAdded,
+		}
+		if !slices.Equal(methods, want) {
+			t.Fatalf("optOutNotificationMethods = %#v, want %#v", methods, want)
+		}
+	})
+
+	t.Run("summary-only streaming opts out raw reasoning deltas", func(t *testing.T) {
+		opts := Options{MessageStreaming: true, ReasoningThoughts: "summary"}
+		params := appServerInitializeParams("bridge", opts)
+		caps := params["capabilities"].(map[string]any)
+		methods := caps["optOutNotificationMethods"].([]string)
+		want := []string{methodReasoningTextDelta}
+		if !slices.Equal(methods, want) {
+			t.Fatalf("optOutNotificationMethods = %#v, want %#v", methods, want)
+		}
+	})
+
+	t.Run("content-only streaming opts out summary reasoning notifications", func(t *testing.T) {
+		opts := Options{MessageStreaming: true, ReasoningThoughts: "content"}
+		params := appServerInitializeParams("bridge", opts)
+		caps := params["capabilities"].(map[string]any)
+		methods := caps["optOutNotificationMethods"].([]string)
+		want := []string{
+			methodReasoningSummaryTextDelta,
+			methodReasoningSummaryPartAdded,
+		}
+		if !slices.Equal(methods, want) {
+			t.Fatalf("optOutNotificationMethods = %#v, want %#v", methods, want)
+		}
+	})
+
+	t.Run("reasoning thoughts off opts out all reasoning notifications", func(t *testing.T) {
+		opts := Options{MessageStreaming: true, ReasoningThoughts: "off"}
+		params := appServerInitializeParams("bridge", opts)
+		caps := params["capabilities"].(map[string]any)
+		methods := caps["optOutNotificationMethods"].([]string)
+		want := []string{
+			methodReasoningTextDelta,
+			methodReasoningSummaryTextDelta,
+			methodReasoningSummaryPartAdded,
+		}
+		if !slices.Equal(methods, want) {
+			t.Fatalf("optOutNotificationMethods = %#v, want %#v", methods, want)
+		}
+	})
 }
 
 func TestCallSuccessAndDecodePaths(t *testing.T) {
@@ -389,6 +477,36 @@ func TestHandleIncomingLine(t *testing.T) {
 	})
 }
 
+func TestEmitEventDropsWhenShutdownStarts(t *testing.T) {
+	backend := newTestBackend(&captureWriteCloser{})
+	backend.events = make(chan appServerEvent, 1)
+	backend.events <- appServerEvent{
+		Notification: &appServerNotification{Method: "busy"},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		backend.emitEvent(appServerEvent{
+			Notification: &appServerNotification{Method: "late"},
+		})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("emitEvent returned before shutdown while channel was full")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(backend.closing)
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("emitEvent blocked after shutdown started")
+	}
+}
+
 func TestTurnInterrupt(t *testing.T) {
 	t.Run("empty ids is no-op", func(t *testing.T) {
 		writer := &captureWriteCloser{}
@@ -514,6 +632,179 @@ func TestClose(t *testing.T) {
 			t.Fatalf("Close() error = %v, want nil", err)
 		}
 	})
+
+	t.Run("sends interrupt before waiting for exit", func(t *testing.T) {
+		signalFile := filepath.Join(t.TempDir(), "signal.txt")
+		backend := newHelperBackend(t, "exit-on-int", signalFile)
+
+		closeDone := make(chan error, 1)
+		go func() {
+			closeDone <- backend.Close()
+		}()
+
+		select {
+		case err := <-closeDone:
+			if err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("Close() timed out")
+		}
+
+		if err := backend.Wait(); err != nil {
+			t.Fatalf("Wait() error = %v", err)
+		}
+		got, err := os.ReadFile(signalFile)
+		if err != nil {
+			t.Fatalf("ReadFile(%q) error = %v", signalFile, err)
+		}
+		if strings.TrimSpace(string(got)) != os.Interrupt.String() {
+			t.Fatalf("signal marker = %q, want %q", strings.TrimSpace(string(got)), os.Interrupt.String())
+		}
+	})
+
+	t.Run("kills process after grace period when interrupt is ignored", func(t *testing.T) {
+		backend := newHelperBackend(t, "ignore-int", "")
+		backend.shutdownGracePeriod = 20 * time.Millisecond
+
+		start := time.Now()
+		if err := backend.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+		if err := backend.Wait(); err == nil {
+			t.Fatal("Wait() error = nil, want non-nil after forced kill")
+		}
+		if elapsed := time.Since(start); elapsed < backend.shutdownGracePeriod {
+			t.Fatalf("Close()/Wait elapsed = %v, want at least %v", elapsed, backend.shutdownGracePeriod)
+		}
+	})
+}
+
+func TestReadLoopSuppressesExpectedCloseError(t *testing.T) {
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs)
+	backend := newTestBackend(&captureWriteCloser{})
+	backend.logger = &logger
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe() error = %v", err)
+	}
+	defer func() { _ = writer.Close() }()
+
+	done := make(chan struct{})
+	go func() {
+		backend.readLoop(reader)
+		close(done)
+	}()
+
+	close(backend.closing)
+	if err := reader.Close(); err != nil {
+		t.Fatalf("reader.Close() error = %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("readLoop did not stop")
+	}
+
+	if strings.Contains(logs.String(), "bridge backend read loop stopped") {
+		t.Fatalf("readLoop logged expected shutdown noise: %q", logs.String())
+	}
+}
+
+func newHelperBackend(t *testing.T, mode string, signalFile string) *appServerBackend {
+	t.Helper()
+
+	readyFile := filepath.Join(t.TempDir(), "ready.txt")
+	cmd := exec.Command(os.Args[0], "-test.run=TestBackendHelperProcess")
+	cmd.Env = append(os.Environ(),
+		"GO_WANT_APP_SERVER_BACKEND_HELPER=1",
+		"BACKEND_HELPER_MODE="+mode,
+		"BACKEND_HELPER_READY_FILE="+readyFile,
+		"BACKEND_HELPER_SIGNAL_FILE="+signalFile,
+	)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("StdinPipe() error = %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	})
+
+	backend := newTestBackend(stdin)
+	backend.cmd = cmd
+	close(backend.readDone)
+	go backend.waitLoop()
+	waitForFile(t, readyFile)
+	return backend
+}
+
+func TestBackendHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_APP_SERVER_BACKEND_HELPER") != "1" {
+		return
+	}
+
+	mode := os.Getenv("BACKEND_HELPER_MODE")
+	readyFile := os.Getenv("BACKEND_HELPER_READY_FILE")
+	signalFile := os.Getenv("BACKEND_HELPER_SIGNAL_FILE")
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt)
+	if strings.TrimSpace(readyFile) != "" {
+		if err := os.WriteFile(readyFile, []byte("ready"), 0o644); err != nil {
+			signal.Stop(signals)
+			os.Exit(4)
+		}
+	}
+
+	writeSignal := func(sig os.Signal) {
+		if strings.TrimSpace(signalFile) == "" {
+			return
+		}
+		if err := os.WriteFile(signalFile, []byte(sig.String()), 0o644); err != nil {
+			os.Exit(2)
+		}
+	}
+
+	switch mode {
+	case "exit-on-int":
+		sig := <-signals
+		writeSignal(sig)
+		signal.Stop(signals)
+		os.Exit(0)
+	case "ignore-int":
+		for range signals {
+			writeSignal(os.Interrupt)
+		}
+	default:
+		signal.Stop(signals)
+		os.Exit(3)
+	}
+}
+
+func waitForFile(t *testing.T, path string) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("Stat(%q) error = %v", path, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("file %q was not created before timeout", path)
 }
 
 func canceledContext() context.Context {
