@@ -50,6 +50,9 @@ const (
 	metaContentIndexKey  = "codex-acp-bridge/contentIndex"
 	reasoningKindSummary = "summary"
 	reasoningKindContent = "content"
+
+	errBridgeShuttingDown        = "bridge is shutting down"
+	errSessionBackendUnavailable = "session backend unavailable"
 )
 
 type codexACPConnection interface {
@@ -74,6 +77,7 @@ type codexACPProxyAgent struct {
 	mu            sync.Mutex
 	sessions      map[acp.SessionId]*codexProxySessionState
 	nextSessionID uint64
+	shuttingDown  bool
 }
 
 type promptCompletion struct {
@@ -232,6 +236,9 @@ func (a *codexACPProxyAgent) ListSessions(_ context.Context, _ acp.ListSessionsR
 }
 
 func (a *codexACPProxyAgent) NewSession(ctx context.Context, params acp.NewSessionRequest) (acp.NewSessionResponse, error) {
+	if err := a.rejectIfShuttingDown(); err != nil {
+		return acp.NewSessionResponse{}, err
+	}
 	requestedSessionID, sessionConfig, err := sessionConfigFromNewSessionMeta(params.Meta, a.defaultConfig)
 	if err != nil {
 		return acp.NewSessionResponse{}, acp.NewInvalidParams(err.Error())
@@ -249,6 +256,10 @@ func (a *codexACPProxyAgent) NewSession(ctx context.Context, params acp.NewSessi
 	}
 
 	a.mu.Lock()
+	if a.shuttingDown {
+		a.mu.Unlock()
+		return acp.NewSessionResponse{}, errors.New(errBridgeShuttingDown)
+	}
 	if _, exists := a.sessions[sessionID]; exists {
 		a.mu.Unlock()
 		return acp.NewSessionResponse{}, acp.NewInvalidParams(fmt.Sprintf("session %q already exists", sessionID))
@@ -313,6 +324,9 @@ func (a *codexACPProxyAgent) NewSession(ctx context.Context, params acp.NewSessi
 }
 
 func (a *codexACPProxyAgent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
+	if err := a.rejectIfShuttingDown(); err != nil {
+		return acp.PromptResponse{}, err
+	}
 	if err := a.ensureSessionBackend(ctx, params.SessionId); err != nil {
 		return acp.PromptResponse{}, err
 	}
@@ -326,13 +340,17 @@ func (a *codexACPProxyAgent) Prompt(ctx context.Context, params acp.PromptReques
 		a.mu.Unlock()
 		return acp.PromptResponse{}, acp.NewInvalidParams("session not found")
 	}
+	if a.shuttingDown {
+		a.mu.Unlock()
+		return acp.PromptResponse{}, errors.New(errBridgeShuttingDown)
+	}
 	if state.done != nil {
 		a.mu.Unlock()
 		return acp.PromptResponse{}, acp.NewInvalidRequest("prompt already active for session")
 	}
 	if state.backend == nil {
 		a.mu.Unlock()
-		return acp.PromptResponse{}, errors.New("session backend unavailable")
+		return acp.PromptResponse{}, errors.New(errSessionBackendUnavailable)
 	}
 	promptCtx, cancel := context.WithCancel(ctx)
 	state.cancel = cancel
@@ -342,11 +360,6 @@ func (a *codexACPProxyAgent) Prompt(ctx context.Context, params acp.PromptReques
 	model := state.model
 	reasoningEffort := state.reasoningEffort
 	doneCh := state.done
-	var workerCtx context.Context
-	if state.workerCancel == nil {
-		workerCtx, state.workerCancel = context.WithCancel(context.Background())
-	}
-	startWorker := workerCtx != nil
 	a.mu.Unlock()
 
 	turnStartParams, err := buildTurnStartParams(threadID, params.Prompt, model, reasoningEffort)
@@ -369,14 +382,6 @@ func (a *codexACPProxyAgent) Prompt(ctx context.Context, params acp.PromptReques
 
 	turnStart, err := backend.TurnStart(promptCtx, turnStartParams)
 	if err != nil {
-		if startWorker {
-			a.mu.Lock()
-			if current := a.sessions[params.SessionId]; current != nil && current.workerCancel != nil {
-				current.workerCancel()
-				current.workerCancel = nil
-			}
-			a.mu.Unlock()
-		}
 		return acp.PromptResponse{}, fmt.Errorf("turn/start: %w", err)
 	}
 	turnID := strings.TrimSpace(turnStart.Turn.ID)
@@ -391,9 +396,6 @@ func (a *codexACPProxyAgent) Prompt(ctx context.Context, params acp.PromptReques
 		current.latestUsage = nil
 	}
 	a.mu.Unlock()
-	if startWorker {
-		go a.runSessionEventLoop(workerCtx, params.SessionId, backend)
-	}
 
 	for {
 		select {
@@ -435,6 +437,9 @@ func (a *codexACPProxyAgent) SetSessionConfigOption(
 	ctx context.Context,
 	params acp.SetSessionConfigOptionRequest,
 ) (acp.SetSessionConfigOptionResponse, error) {
+	if err := a.rejectIfShuttingDown(); err != nil {
+		return acp.SetSessionConfigOptionResponse{}, err
+	}
 	req := params.ValueId
 	if req == nil {
 		if params.Boolean != nil && strings.TrimSpace(string(params.Boolean.ConfigId)) != sessionConfigIDReasoningEffort {
@@ -461,6 +466,9 @@ func (a *codexACPProxyAgent) SetSessionMode(_ context.Context, params acp.SetSes
 	nextMode := strings.TrimSpace(string(params.ModeId))
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.shuttingDown {
+		return acp.SetSessionModeResponse{}, errors.New(errBridgeShuttingDown)
+	}
 	state, ok := a.sessions[params.SessionId]
 	if !ok {
 		return acp.SetSessionModeResponse{}, acp.NewInvalidParams("session not found")
@@ -476,8 +484,15 @@ func (a *codexACPProxyAgent) UnstableSetSessionModel(
 	ctx context.Context,
 	params acp.UnstableSetSessionModelRequest,
 ) (acp.UnstableSetSessionModelResponse, error) {
+	if err := a.rejectIfShuttingDown(); err != nil {
+		return acp.UnstableSetSessionModelResponse{}, err
+	}
 	nextModel := strings.TrimSpace(string(params.ModelId))
 	a.mu.Lock()
+	if a.shuttingDown {
+		a.mu.Unlock()
+		return acp.UnstableSetSessionModelResponse{}, errors.New(errBridgeShuttingDown)
+	}
 	state, ok := a.sessions[params.SessionId]
 	if !ok {
 		a.mu.Unlock()
@@ -515,8 +530,20 @@ func (a *codexACPProxyAgent) ensureSessionBackend(ctx context.Context, sessionID
 		a.mu.Unlock()
 		return acp.NewInvalidParams("session not found")
 	}
-	if state.backend != nil {
+	if a.shuttingDown {
 		a.mu.Unlock()
+		return errors.New(errBridgeShuttingDown)
+	}
+	if state.backend != nil {
+		if state.workerCancel != nil {
+			a.mu.Unlock()
+			return nil
+		}
+		backend := state.backend
+		workerCtx, workerCancel := context.WithCancel(context.Background())
+		state.workerCancel = workerCancel
+		a.mu.Unlock()
+		go a.runSessionEventLoop(workerCtx, sessionID, backend)
 		return nil
 	}
 	sessionCWD := state.cwd
@@ -535,14 +562,23 @@ func (a *codexACPProxyAgent) ensureSessionBackend(ctx context.Context, sessionID
 		_ = backend.Wait()
 		return acp.NewInvalidParams("session not found")
 	}
+	if a.shuttingDown {
+		a.mu.Unlock()
+		_ = backend.Close()
+		_ = backend.Wait()
+		return errors.New(errBridgeShuttingDown)
+	}
 	if state.backend != nil {
 		a.mu.Unlock()
 		_ = backend.Close()
 		_ = backend.Wait()
 		return nil
 	}
+	workerCtx, workerCancel := context.WithCancel(context.Background())
 	state.backend = backend
+	state.workerCancel = workerCancel
 	a.mu.Unlock()
+	go a.runSessionEventLoop(workerCtx, sessionID, backend)
 	return nil
 }
 
@@ -555,7 +591,7 @@ func (a *codexACPProxyAgent) ensureSessionThread(ctx context.Context, sessionID 
 	}
 	if state.backend == nil {
 		a.mu.Unlock()
-		return errors.New("session backend unavailable")
+		return errors.New(errSessionBackendUnavailable)
 	}
 	if strings.TrimSpace(state.threadID) != "" {
 		a.mu.Unlock()
@@ -604,7 +640,7 @@ func (a *codexACPProxyAgent) buildSessionModelConfigState(
 	currentReasoningEffort := strings.TrimSpace(state.reasoningEffort)
 	a.mu.Unlock()
 	if backend == nil {
-		return nil, nil, errors.New("session backend unavailable")
+		return nil, nil, errors.New(errSessionBackendUnavailable)
 	}
 
 	models, err := listAppServerModels(ctx, backend)
@@ -692,7 +728,7 @@ func (a *codexACPProxyAgent) setSessionReasoningEffort(
 	currentModelID := strings.TrimSpace(state.model)
 	a.mu.Unlock()
 	if backend == nil {
-		return nil, errors.New("session backend unavailable")
+		return nil, errors.New(errSessionBackendUnavailable)
 	}
 
 	models, err := listAppServerModels(ctx, backend)
@@ -937,6 +973,7 @@ func (a *codexACPProxyAgent) closeAllSessionBackends() {
 		workerCancel context.CancelFunc
 	}
 	a.mu.Lock()
+	a.shuttingDown = true
 	entries := make([]backendEntry, 0, len(a.sessions))
 	for _, state := range a.sessions {
 		entries = append(entries, backendEntry{
@@ -967,6 +1004,21 @@ func (a *codexACPProxyAgent) closeAllSessionBackends() {
 	}
 }
 
+func (a *codexACPProxyAgent) beginShutdown() {
+	a.mu.Lock()
+	a.shuttingDown = true
+	a.mu.Unlock()
+}
+
+func (a *codexACPProxyAgent) rejectIfShuttingDown() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.shuttingDown {
+		return errors.New(errBridgeShuttingDown)
+	}
+	return nil
+}
+
 func (a *codexACPProxyAgent) handleNotification(
 	ctx context.Context,
 	sessionID acp.SessionId,
@@ -983,7 +1035,16 @@ func (a *codexACPProxyAgent) handleNotification(
 		return false, "", nil, nil
 	}
 	if requiresActiveTurn(note.Method) {
-		if !hasActivePrompt || strings.TrimSpace(turnID) == "" {
+		if !hasActivePrompt {
+			return false, "", nil, nil
+		}
+		if strings.TrimSpace(turnID) == "" && note.Method != methodTurnStarted {
+			if nextTurnID := strings.TrimSpace(stringValue(params, "turnId")); nextTurnID != "" {
+				a.syncTurnID(sessionID, nextTurnID)
+				turnID = nextTurnID
+			}
+		}
+		if strings.TrimSpace(turnID) == "" {
 			return false, "", nil, nil
 		}
 		if note.Method != methodTurnStarted && !matchesTurnID(params, turnID) {
@@ -1348,7 +1409,7 @@ func (a *codexACPProxyAgent) handleServerRequest(ctx context.Context, sessionID 
 	state := a.sessions[sessionID]
 	if state == nil || state.backend == nil {
 		a.mu.Unlock()
-		return acp.NewInvalidParams("session backend unavailable")
+		return acp.NewInvalidParams(errSessionBackendUnavailable)
 	}
 	backend := state.backend
 	a.mu.Unlock()
@@ -2760,6 +2821,7 @@ func (a *codexACPProxyAgent) clearSessionBackend(sessionID acp.SessionId, backen
 	state.workerCancel = nil
 	state.threadID = ""
 	state.turnID = ""
+	state.pendingRequests = nil
 }
 
 func (a *codexACPProxyAgent) syncThreadID(sessionID acp.SessionId, nextThreadID string) {

@@ -2296,6 +2296,122 @@ func TestPromptForwardsSessionScopedUpdatesAfterCompletion(t *testing.T) {
 	}
 }
 
+func TestPromptRecreatesBackendAfterSessionBackendStopsBeforeFirstPrompt(t *testing.T) {
+	firstSession := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	secondSession := newFakeAppServerSession("codex_test/1.0.0", "thr-2", "turn-2")
+	queueNotification(secondSession, "turn/completed", map[string]any{
+		"threadId": "thr-2",
+		"turnId":   "turn-2",
+		"turn": map[string]any{
+			"id":     "turn-2",
+			"status": "completed",
+		},
+	})
+
+	l := zerolog.Nop()
+	var (
+		factoryMu sync.Mutex
+		calls     int
+	)
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		factoryMu.Lock()
+		defer factoryMu.Unlock()
+		calls++
+		if calls == 1 {
+			return firstSession, nil
+		}
+		return secondSession, nil
+	}, "agent", codexAppConfig{}, &l)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+
+	close(firstSession.events)
+	waitForCondition(t, 500*time.Millisecond, func() bool {
+		agent.mu.Lock()
+		defer agent.mu.Unlock()
+		state := agent.sessions[newResp.SessionId]
+		return state != nil && state.backend == nil && state.threadID == ""
+	}, "session backend was not cleared after backend event stream closed")
+
+	promptResp, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	})
+	if err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+	if promptResp.StopReason != acp.StopReasonEndTurn {
+		t.Fatalf("Prompt().StopReason = %q, want %q", promptResp.StopReason, acp.StopReasonEndTurn)
+	}
+	if got := len(firstSession.turnStartParamsSnapshot()); got != 0 {
+		t.Fatalf("first session turn/start calls = %d, want 0", got)
+	}
+	if got := len(secondSession.threadStartParamsSnapshot()); got != 1 {
+		t.Fatalf("replacement session thread/start calls = %d, want 1", got)
+	}
+	if got := len(secondSession.turnStartParamsSnapshot()); got != 1 {
+		t.Fatalf("replacement session turn/start calls = %d, want 1", got)
+	}
+}
+
+func TestShuttingDownRejectsNewACPRequests(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	agent.beginShutdown()
+
+	if _, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/other"}); err == nil {
+		t.Fatal("NewSession() error = nil, want shutdown error")
+	} else {
+		assertShutdownError(t, err, errBridgeShuttingDown)
+	}
+	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	}); err == nil {
+		t.Fatal("Prompt() error = nil, want shutdown error")
+	} else {
+		assertShutdownError(t, err, errBridgeShuttingDown)
+	}
+	if _, err := agent.SetSessionMode(context.Background(), acp.SetSessionModeRequest{
+		SessionId: newResp.SessionId,
+		ModeId:    acp.SessionModeId("chat"),
+	}); err == nil {
+		t.Fatal("SetSessionMode() error = nil, want shutdown error")
+	} else {
+		assertShutdownError(t, err, errBridgeShuttingDown)
+	}
+	if _, err := agent.UnstableSetSessionModel(context.Background(), acp.UnstableSetSessionModelRequest{
+		SessionId: newResp.SessionId,
+		ModelId:   acp.UnstableModelId("gpt-5.4"),
+	}); err == nil {
+		t.Fatal("UnstableSetSessionModel() error = nil, want shutdown error")
+	} else {
+		assertShutdownError(t, err, errBridgeShuttingDown)
+	}
+	if _, err := agent.SetSessionConfigOption(context.Background(), acp.SetSessionConfigOptionRequest{
+		ValueId: &acp.SetSessionConfigOptionValueId{
+			SessionId: newResp.SessionId,
+			ConfigId:  acp.SessionConfigId(sessionConfigIDReasoningEffort),
+			Value:     acp.SessionConfigValueId(testReasoningXHigh),
+		},
+	}); err == nil {
+		t.Fatal("SetSessionConfigOption() error = nil, want shutdown error")
+	} else {
+		assertShutdownError(t, err, errBridgeShuttingDown)
+	}
+}
+
 func TestPromptRebindsTurnIDFromTurnStartedNotification(t *testing.T) {
 	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
 	conn := &fakeACPAppConnection{}
@@ -3281,6 +3397,17 @@ func queueRequest(session *fakeAppServerSession, method string, id json.RawMessa
 			Method: method,
 			Params: raw,
 		},
+	}
+}
+
+func assertShutdownError(t *testing.T, err error, wantMessage string) {
+	t.Helper()
+
+	if err == nil {
+		t.Fatal("error = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), wantMessage) {
+		t.Fatalf("error = %q, want contains %q", err.Error(), wantMessage)
 	}
 }
 

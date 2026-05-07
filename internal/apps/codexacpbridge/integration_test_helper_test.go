@@ -1,4 +1,4 @@
-//go:build integration && codex
+//go:build integration
 
 package codexacp_test
 
@@ -22,6 +22,7 @@ type integrationACPClientConfig struct {
 	Command    []string
 	WorkingDir string
 	Stderr     io.Writer
+	Env        []string
 }
 
 type integrationExtendedSessionNotification struct {
@@ -45,6 +46,8 @@ type integrationACPClient struct {
 	activeMu sync.Mutex
 	active   map[acp.SessionId]*integrationPromptState
 	closed   atomic.Bool
+	waitOnce sync.Once
+	waitErr  error
 }
 
 var _ acp.Client = (*integrationACPClient)(nil)
@@ -63,6 +66,9 @@ func newIntegrationACPClient(ctx context.Context, cfg integrationACPClientConfig
 
 	cmd := exec.CommandContext(ctx, cfg.Command[0], cfg.Command[1:]...)
 	cmd.Dir = cfg.WorkingDir
+	if len(cfg.Env) > 0 {
+		cmd.Env = append([]string(nil), cfg.Env...)
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("acp stdin pipe: %w", err)
@@ -168,14 +174,42 @@ func (c *integrationACPClient) Close() error {
 	}
 	if c.cmd != nil && c.cmd.Process != nil {
 		if err := c.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
-			_ = c.cmd.Wait()
+			_ = c.wait()
 			c.closeAllActive()
 			return fmt.Errorf("kill acp process: %w", err)
 		}
-		_ = c.cmd.Wait()
+		_ = c.wait()
 	}
 	c.closeAllActive()
 	return nil
+}
+
+func (c *integrationACPClient) CloseStdin() error {
+	if c.stdin == nil {
+		return nil
+	}
+	return c.stdin.Close()
+}
+
+func (c *integrationACPClient) Signal(sig os.Signal) error {
+	if c.cmd == nil || c.cmd.Process == nil {
+		return os.ErrProcessDone
+	}
+	if err := c.cmd.Process.Signal(sig); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return err
+	}
+	return nil
+}
+
+func (c *integrationACPClient) Wait() error {
+	return c.wait()
+}
+
+func (c *integrationACPClient) PID() int {
+	if c.cmd == nil || c.cmd.Process == nil {
+		return 0
+	}
+	return c.cmd.Process.Pid
 }
 
 func (c *integrationACPClient) ReadTextFile(_ context.Context, _ acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
@@ -265,6 +299,15 @@ func (c *integrationACPClient) closeAllActive() {
 	for _, stream := range active {
 		close(stream.updates)
 	}
+}
+
+func (c *integrationACPClient) wait() error {
+	c.waitOnce.Do(func() {
+		if c.cmd != nil {
+			c.waitErr = c.cmd.Wait()
+		}
+	})
+	return c.waitErr
 }
 
 func cloneAnyMap(src map[string]any) map[string]any {

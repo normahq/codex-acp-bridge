@@ -158,6 +158,13 @@ func TestSendJSON(t *testing.T) {
 			writeErr: errors.New("sink failed"),
 			wantErr:  "write bridge backend payload",
 		},
+		{
+			name:     "closed pipe write maps to backend stopped",
+			ctx:      context.Background(),
+			payload:  map[string]any{"ok": true},
+			writeErr: io.ErrClosedPipe,
+			wantErr:  errBackendStopped,
+		},
 	}
 
 	for _, tc := range cases {

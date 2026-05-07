@@ -19,6 +19,7 @@ import (
 )
 
 const defaultBackendShutdownGracePeriod = 2 * time.Second
+const signalForwardingGracePeriod = 100 * time.Millisecond
 
 type appServerRPCError struct {
 	Code    int    `json:"code"`
@@ -139,7 +140,8 @@ type appServerSession interface {
 }
 
 func connectAppServerBackend(
-	ctx context.Context,
+	lifetimeCtx context.Context,
+	initCtx context.Context,
 	workingDir string,
 	sessionCWD string,
 	command []string,
@@ -156,7 +158,7 @@ func connectAppServerBackend(
 		logger = &nop
 	}
 
-	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
+	cmd := exec.CommandContext(lifetimeCtx, command[0], command[1:]...)
 	cmd.Dir = strings.TrimSpace(sessionCWD)
 	if cmd.Dir == "" {
 		cmd.Dir = workingDir
@@ -202,7 +204,7 @@ func connectAppServerBackend(
 	go backend.readLoop(stdout)
 	go backend.waitLoop()
 
-	initializeResp, err := backend.initialize(ctx, clientName, opts)
+	initializeResp, err := backend.initialize(initCtx, clientName, opts)
 	if err != nil {
 		_ = backend.Close()
 		_ = backend.Wait()
@@ -431,6 +433,9 @@ func (b *appServerBackend) sendJSON(ctx context.Context, payload any) error {
 	}
 
 	if _, err := b.stdin.Write(append(raw, '\n')); err != nil {
+		if b.isShuttingDown() || isClosedPipeWriteError(err) {
+			return errors.New("bridge backend stopped")
+		}
 		return fmt.Errorf("write bridge backend payload: %w", err)
 	}
 	if b.logger.Debug().Enabled() {
@@ -516,10 +521,18 @@ func (b *appServerBackend) emitEvent(event appServerEvent) {
 	select {
 	case <-b.done:
 		return
+	default:
+	}
+
+	select {
+	case <-b.done:
+		return
 	case b.events <- event:
 		return
 	case <-b.closing:
 		select {
+		case <-b.done:
+			return
 		case b.events <- event:
 		default:
 		}
@@ -554,10 +567,10 @@ func (b *appServerBackend) Close() error {
 	var closeErr error
 	b.closeOnce.Do(func() {
 		close(b.closing)
-		if err := b.stdin.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
-			closeErr = err
-		}
 		if b.cmd == nil || b.cmd.Process == nil {
+			if err := b.stdin.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+				closeErr = err
+			}
 			return
 		}
 
@@ -569,14 +582,20 @@ func (b *appServerBackend) Close() error {
 		} else {
 			waitForExit = true
 		}
+		if waitForExit {
+			_, exited := b.waitForDone(minDuration(b.shutdownGracePeriod, signalForwardingGracePeriod))
+			if exited {
+				return
+			}
+		}
+		if err := b.stdin.Close(); err != nil && !errors.Is(err, os.ErrClosed) && closeErr == nil {
+			closeErr = err
+		}
 
 		if waitForExit {
-			timer := time.NewTimer(b.shutdownGracePeriod)
-			defer timer.Stop()
-			select {
-			case <-b.done:
+			remaining := b.shutdownGracePeriod - minDuration(b.shutdownGracePeriod, signalForwardingGracePeriod)
+			if _, exited := b.waitForDone(remaining); exited {
 				return
-			case <-timer.C:
 			}
 		}
 
@@ -627,4 +646,45 @@ func isClosedPipeReadError(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "file already closed") || strings.Contains(msg, "use of closed file")
+}
+
+func isClosedPipeWriteError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "file already closed") ||
+		strings.Contains(msg, "use of closed file")
+}
+
+func (b *appServerBackend) waitForDone(timeout time.Duration) (time.Duration, bool) {
+	if timeout <= 0 {
+		select {
+		case <-b.done:
+			return 0, true
+		default:
+			return 0, false
+		}
+	}
+
+	start := time.Now()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-b.done:
+		return time.Since(start), true
+	case <-timer.C:
+		return timeout, false
+	}
+}
+
+func minDuration(a time.Duration, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
 }

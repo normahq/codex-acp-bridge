@@ -53,7 +53,7 @@ func RunProxy(ctx context.Context, workingDir string, opts Options, stdin io.Rea
 		Msg("starting codex acp bridge")
 
 	sessionFactory := func(factoryCtx context.Context, sessionCWD string) (appServerSession, error) {
-		return connectAppServerBackend(factoryCtx, workingDir, sessionCWD, command, bridgeClientName, lockedStderr, logger, opts)
+		return connectAppServerBackend(ctx, factoryCtx, workingDir, sessionCWD, command, bridgeClientName, lockedStderr, logger, opts)
 	}
 	identity, err := validateAppServerFactory(ctx, sessionFactory, workingDir)
 	if err != nil {
@@ -76,10 +76,12 @@ func RunProxy(ctx context.Context, workingDir string, opts Options, stdin io.Rea
 	select {
 	case <-conn.Done():
 		logger.Debug().Msg("acp client disconnected")
+		proxy.beginShutdown()
 		proxy.closeAllSessionBackends()
 		return nil
 	case <-ctx.Done():
 		logger.Debug().Err(ctx.Err()).Msg("proxy context canceled")
+		proxy.beginShutdown()
 		proxy.closeAllSessionBackends()
 		return ctx.Err()
 	}
