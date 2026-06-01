@@ -7,6 +7,7 @@ import (
 
 	codexacpbridge "github.com/normahq/codex-acp-bridge/internal/apps/codexacpbridge"
 	"github.com/normahq/codex-acp-bridge/internal/logging"
+	appversion "github.com/normahq/codex-acp-bridge/internal/version"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 )
@@ -62,9 +63,24 @@ func Command() *cobra.Command {
 	//nolint:dupword
 	cmd.Example = `  codex-acp-bridge
   codex-acp-bridge --name team-codex
+  codex-acp-bridge version
   codex-acp-bridge --message-streaming
   codex-acp-bridge --reasoning-thoughts=both
   codex-acp-bridge --reasoning-streaming=false
   codex-acp-bridge --debug`
+	cmd.AddCommand(versionCommand())
 	return cmd
+}
+
+func versionCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:          "version",
+		Short:        "Print the bridge version",
+		SilenceUsage: true,
+		Args:         cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			_, err := fmt.Fprintln(cmd.OutOrStdout(), appversion.String())
+			return err
+		},
+	}
 }

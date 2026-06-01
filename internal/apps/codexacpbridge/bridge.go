@@ -10,13 +10,14 @@ import (
 	acp "github.com/coder/acp-go-sdk"
 	"github.com/normahq/codex-acp-bridge/internal/apps/appio"
 	"github.com/normahq/codex-acp-bridge/internal/logging"
+	appversion "github.com/normahq/codex-acp-bridge/internal/version"
 )
 
 // DefaultAgentName is the fallback ACP agent name used when backend identity is unavailable.
 const DefaultAgentName = "norma-codex-acp-bridge"
 
 // DefaultAgentVersion is the fallback ACP agent version used when backend identity is unavailable.
-const DefaultAgentVersion = "dev"
+var DefaultAgentVersion = appversion.String()
 
 type appServerBackendFactory func(ctx context.Context, cwd string) (appServerSession, error)
 

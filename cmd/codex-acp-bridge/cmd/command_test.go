@@ -9,6 +9,7 @@ import (
 
 	codexacpbridge "github.com/normahq/codex-acp-bridge/internal/apps/codexacpbridge"
 	"github.com/normahq/codex-acp-bridge/internal/logging"
+	appversion "github.com/normahq/codex-acp-bridge/internal/version"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
@@ -70,6 +71,25 @@ func TestCommandExposesOnlyBridgeFlags(t *testing.T) {
 		if got := cmd.Flags().Lookup(expectedFlag); got == nil {
 			t.Fatalf("flag %q missing", expectedFlag)
 		}
+	}
+	if got := cmd.Commands(); len(got) == 0 {
+		t.Fatal("commands = 0, want version subcommand")
+	}
+}
+
+func TestVersionCommandPrintsBuildVersion(t *testing.T) {
+	cmd := Command()
+	var stdout bytes.Buffer
+	cmd.SetArgs([]string{"version"})
+	cmd.SetOut(&stdout)
+	cmd.SetErr(io.Discard)
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if got := stdout.String(); got != appversion.String()+"\n" {
+		t.Fatalf("stdout = %q, want %q", got, appversion.String()+"\n")
 	}
 }
 
