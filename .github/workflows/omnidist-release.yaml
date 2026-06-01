@@ -19,7 +19,7 @@ jobs:
         with:
           node-version: "24"
       - name: Install omnidist
-        run: npm install -g '@omnidist/omnidist@0.1.25'
+        run: npm install -g '@omnidist/omnidist@0.1.29'
       - name: Build artifacts
         run: omnidist --profile 'codex-acp-bridge' build
       - name: Stage artifacts
@@ -52,7 +52,7 @@ jobs:
         with:
           node-version: "24"
       - name: Install omnidist
-        run: npm install -g '@omnidist/omnidist@0.1.25'
+        run: npm install -g '@omnidist/omnidist@0.1.29'
       - name: Download staged artifacts
         uses: actions/download-artifact@v4
         with:
