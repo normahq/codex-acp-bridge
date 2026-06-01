@@ -193,7 +193,6 @@ func (a *codexACPProxyAgent) Initialize(_ context.Context, _ acp.InitializeReque
 			Version: a.agentVersion,
 		},
 		AgentCapabilities: acp.AgentCapabilities{
-			LoadSession: true,
 			McpCapabilities: acp.McpCapabilities{
 				Http: true,
 				Sse:  false,
@@ -294,22 +293,10 @@ func (a *codexACPProxyAgent) NewSession(ctx context.Context, params acp.NewSessi
 }
 
 func (a *codexACPProxyAgent) LoadSession(
-	ctx context.Context,
-	params acp.LoadSessionRequest,
+	_ context.Context,
+	_ acp.LoadSessionRequest,
 ) (acp.LoadSessionResponse, error) {
-	resp, err := a.restoreSession(
-		ctx,
-		params.SessionId,
-		strings.TrimSpace(params.Cwd),
-		params.McpServers,
-		params.Meta,
-		params.AdditionalDirectories,
-		"session/load",
-	)
-	if err != nil {
-		return acp.LoadSessionResponse{}, err
-	}
-	return resp.LoadResponse(), nil
+	return acp.LoadSessionResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionLoad)
 }
 
 func (a *codexACPProxyAgent) ResumeSession(
@@ -444,14 +431,6 @@ type sessionRestoreResponse struct {
 	models        *acp.SessionModelState
 	configOptions []acp.SessionConfigOption
 	meta          map[string]any
-}
-
-func (r sessionRestoreResponse) LoadResponse() acp.LoadSessionResponse {
-	return acp.LoadSessionResponse{
-		ConfigOptions: r.configOptions,
-		Meta:          cloneAnyMap(r.meta),
-		Models:        r.models,
-	}
 }
 
 func (r sessionRestoreResponse) ResumeResponse() acp.ResumeSessionResponse {

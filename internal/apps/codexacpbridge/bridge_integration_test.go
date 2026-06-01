@@ -33,8 +33,8 @@ func TestCodexACPIntegrationInitializeCapabilities(t *testing.T) {
 	}
 
 	caps := initResp.AgentCapabilities
-	if !caps.LoadSession {
-		t.Fatalf("initialize loadSession = %t, want true", caps.LoadSession)
+	if caps.LoadSession {
+		t.Fatalf("initialize loadSession = %t, want false", caps.LoadSession)
 	}
 	if !caps.McpCapabilities.Http {
 		t.Fatal("initialize mcpCapabilities.http = false, want true")

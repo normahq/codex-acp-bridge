@@ -64,7 +64,7 @@ npx -y @normahq/codex-acp-bridge@latest
 ## What "full-scale ACP server" means
 
 - Exposes Codex app-server as ACP over stdio.
-- Supports ACP `session/load` and `session/resume` via app-server thread resume.
+- Supports ACP `session/resume` via app-server thread resume.
 - Populates ACP `session/new.models` from `model/list`.
 - Supports ACP `session/set_model` and `session/set_mode`.
 - Supports ACP `session/new.configOptions` and `session/set_config_option` for model-advertised reasoning effort values.

@@ -308,8 +308,8 @@ func TestInitializeAdvertisesImagePromptCapability(t *testing.T) {
 	if resp.AgentCapabilities.PromptCapabilities.Audio {
 		t.Fatal("prompt audio capability = true, want false")
 	}
-	if !resp.AgentCapabilities.LoadSession {
-		t.Fatal("loadSession = false, want true")
+	if resp.AgentCapabilities.LoadSession {
+		t.Fatal("loadSession = true, want false")
 	}
 	if resp.AgentCapabilities.SessionCapabilities.Resume == nil {
 		t.Fatal("sessionCapabilities.resume = nil, want non-nil")
@@ -535,69 +535,26 @@ func TestNewSessionIncludesModelsFromModelList(t *testing.T) {
 	}
 }
 
-func TestLoadSessionResumesExistingBackendSession(t *testing.T) {
-	session := newFakeAppServerSession("codex_test/1.0.0", testThreadLive, "turn-1")
-	session.threadListResponses = []appServerThreadListResponse{
-		{
-			Data: []appServerThread{
-				{ID: "thr-archived", SessionID: "other-session"},
-				{ID: testThreadLive, SessionID: "sess-load-1"},
-			},
-		},
-	}
-	session.threadResumeResp.Thread.ID = testThreadLive
-	session.threadResumeResp.Thread.SessionID = "sess-load-1"
-	session.threadResumeResp.Model = testModelGPT54
-	session.modelListResponses = []appServerModelListResponse{
-		{
-			Data: []appServerModel{
-				{ID: testModelGPT54, DisplayName: "GPT-5.4", IsDefault: true},
-			},
-		},
-	}
-
+func TestLoadSessionReturnsMethodNotFound(t *testing.T) {
 	l := zerolog.Nop()
 	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
-		return session, nil
+		return newFakeAppServerSession("codex_test/1.0.0", testThreadLive, "turn-1"), nil
 	}, "agent", codexAppConfig{}, &l)
 
-	resp, err := agent.LoadSession(context.Background(), acp.LoadSessionRequest{
+	_, err := agent.LoadSession(context.Background(), acp.LoadSessionRequest{
 		SessionId:  "sess-load-1",
 		Cwd:        testCWD,
 		McpServers: []acp.McpServer{},
 	})
-	if err != nil {
-		t.Fatalf("LoadSession() error = %v", err)
+	if err == nil {
+		t.Fatal("LoadSession() error = nil, want non-nil")
 	}
-	if resp.Models == nil {
-		t.Fatal("LoadSession().Models = nil, want non-nil")
+	reqErr := &acp.RequestError{}
+	if !errors.As(err, &reqErr) {
+		t.Fatalf("LoadSession() error type = %T, want *acp.RequestError", err)
 	}
-	if got := string(resp.Models.CurrentModelId); got != testModelGPT54 {
-		t.Fatalf("LoadSession().Models.CurrentModelId = %q, want %q", got, testModelGPT54)
-	}
-	threadListParams := session.threadListParamsSnapshot()
-	if len(threadListParams) != 1 {
-		t.Fatalf("thread/list calls = %d, want 1", len(threadListParams))
-	}
-	threadResumeParams := session.threadResumeParamsSnapshot()
-	if len(threadResumeParams) != 1 {
-		t.Fatalf("thread/resume calls = %d, want 1", len(threadResumeParams))
-	}
-	if got := stringValue(threadResumeParams[0], "threadId"); got != testThreadLive {
-		t.Fatalf("thread/resume threadId = %q, want %q", got, testThreadLive)
-	}
-	if got, ok := boolValue(threadResumeParams[0], "excludeTurns"); !ok || !got {
-		t.Fatalf("thread/resume excludeTurns = %t (ok=%t), want true", got, ok)
-	}
-
-	agent.mu.Lock()
-	state := agent.sessions["sess-load-1"]
-	agent.mu.Unlock()
-	if state == nil {
-		t.Fatal("loaded session state = nil, want non-nil")
-	}
-	if got := state.threadID; got != testThreadLive {
-		t.Fatalf("loaded session threadID = %q, want %q", got, testThreadLive)
+	if reqErr.Code != -32601 {
+		t.Fatalf("LoadSession() request error code = %d, want -32601", reqErr.Code)
 	}
 }
 
@@ -634,7 +591,7 @@ func TestResumeSessionFallsBackToLegacyThreadID(t *testing.T) {
 	}
 }
 
-func TestLoadSessionRejectsAdditionalDirectories(t *testing.T) {
+func TestLoadSessionIgnoresRequestShapeAndReturnsMethodNotFound(t *testing.T) {
 	l := zerolog.Nop()
 	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
 		return newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1"), nil
@@ -649,8 +606,12 @@ func TestLoadSessionRejectsAdditionalDirectories(t *testing.T) {
 	if err == nil {
 		t.Fatal("LoadSession() error = nil, want non-nil")
 	}
-	if !strings.Contains(err.Error(), "additionalDirectories is not supported") {
-		t.Fatalf("LoadSession() error = %v, want unsupported additionalDirectories", err)
+	reqErr := &acp.RequestError{}
+	if !errors.As(err, &reqErr) {
+		t.Fatalf("LoadSession() error type = %T, want *acp.RequestError", err)
+	}
+	if reqErr.Code != -32601 {
+		t.Fatalf("LoadSession() request error code = %d, want -32601", reqErr.Code)
 	}
 }
 
@@ -3628,14 +3589,6 @@ func (f *fakeAppServerSession) modelListParamsSnapshot() []map[string]any {
 	defer f.mu.Unlock()
 	out := make([]map[string]any, len(f.modelListParams))
 	copy(out, f.modelListParams)
-	return out
-}
-
-func (f *fakeAppServerSession) threadListParamsSnapshot() []map[string]any {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := make([]map[string]any, len(f.threadListParams))
-	copy(out, f.threadListParams)
 	return out
 }
 

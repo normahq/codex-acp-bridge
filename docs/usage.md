@@ -85,8 +85,9 @@ acp-repl -- codex-acp-bridge
 - Opens ACP agent-side stdio connection for clients.
 - Creates one backend session per ACP session.
 - `session/new` returns the app-server session tree id (`thread.sessionId`) as the ACP `sessionId`.
-- Supports ACP `session/load` and `session/resume` using app-server `thread/list` + `thread/resume`.
-  - `session/load` and `session/resume` currently restore session state only; they do not replay prior ACP message/thought/tool updates.
+- Supports ACP `session/resume` using app-server `thread/list` + `thread/resume`.
+  - `session/resume` restores session state only; it does not replay prior ACP message/thought/tool updates.
+  - ACP `session/load` is not implemented because the bridge does not replay prior conversation history as required by the protocol.
 - Reads per-session Codex defaults from `session/new.params._meta.codex` (strictly validated).
 - Supports ACP cancellation via `session/cancel`.
 - Optional agent message streaming:
