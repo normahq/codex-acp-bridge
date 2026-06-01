@@ -179,8 +179,9 @@ For request types without a native ACP equivalent, the adapter uses ACP `session
 ### Prompt/session state
 
 - Session creation/resume:
-  - `session/new` starts a fresh app-server thread and returns `thread.sessionId` as the ACP `sessionId`.
-  - `session/resume` resolves the requested ACP `sessionId` through `thread/list` and reattaches with `thread/resume`.
+  - `session/new` starts a fresh app-server thread and returns `thread.id` as the ACP `sessionId`.
+  - `session/resume` passes the requested ACP `sessionId` directly to `thread/resume.threadId`.
+  - `thread.sessionId` remains the backend session-tree identifier and is not used as the ACP resume handle.
   - ACP `session/load` is not implemented because the bridge does not replay prior ACP history before returning.
 - Prompt completion: `turn/completed`; `error` with `willRetry=false`.
 - Usage and metadata: `thread/tokenUsage/updated`, `account/rateLimits/updated`,

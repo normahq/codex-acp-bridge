@@ -107,16 +107,15 @@ type planItemState struct {
 }
 
 type codexProxySessionState struct {
-	cwd              string
-	backendSessionID string
-	config           codexAppConfig
-	threadID         string
-	turnID           string
-	model            string
-	mode             string
-	reasoningEffort  string
-	mcpServers       map[string]acp.McpServer
-	mcpStartup       map[string]sessionMCPStartup
+	cwd             string
+	config          codexAppConfig
+	threadID        string
+	turnID          string
+	model           string
+	mode            string
+	reasoningEffort string
+	mcpServers      map[string]acp.McpServer
+	mcpStartup      map[string]sessionMCPStartup
 
 	backend appServerSession
 	cancel  context.CancelFunc
@@ -263,7 +262,7 @@ func (a *codexACPProxyAgent) NewSession(ctx context.Context, params acp.NewSessi
 	if err != nil {
 		return acp.NewSessionResponse{}, err
 	}
-	sessionID := acp.SessionId(sessionState.backendSessionID)
+	sessionID := acp.SessionId(sessionState.threadID)
 	if err := a.registerSessionState(sessionID, sessionState); err != nil {
 		a.closeSessionState(sessionState)
 		return acp.NewSessionResponse{}, err
@@ -384,14 +383,7 @@ func (a *codexACPProxyAgent) restoreSession(
 		return sessionRestoreResponse{}, err
 	}
 
-	thread, err := findResumableThread(ctx, backend, sessionID)
-	if err != nil {
-		_ = backend.Close()
-		_ = backend.Wait()
-		return sessionRestoreResponse{}, err
-	}
-
-	resumeResp, err := backend.ThreadResume(ctx, buildThreadResumeParams(thread.ID, cwd, sessionConfig, sessionConfig.Model, mcpServers))
+	resumeResp, err := backend.ThreadResume(ctx, buildThreadResumeParams(string(sessionID), cwd, sessionConfig, sessionConfig.Model, mcpServers))
 	if err != nil {
 		_ = backend.Close()
 		_ = backend.Wait()
@@ -533,13 +525,12 @@ func newSessionState(
 	reasoningEffort *string,
 ) *codexProxySessionState {
 	state := &codexProxySessionState{
-		cwd:              strings.TrimSpace(cwd),
-		backendSessionID: strings.TrimSpace(thread.SessionID),
-		config:           sessionConfig,
-		threadID:         strings.TrimSpace(thread.ID),
-		model:            sessionConfig.Model,
-		mcpServers:       mcpServers,
-		backend:          backend,
+		cwd:        strings.TrimSpace(cwd),
+		config:     sessionConfig,
+		threadID:   strings.TrimSpace(thread.ID),
+		model:      sessionConfig.Model,
+		mcpServers: mcpServers,
+		backend:    backend,
 	}
 	if strings.TrimSpace(state.model) == "" {
 		state.model = strings.TrimSpace(model)
@@ -548,80 +539,6 @@ func newSessionState(
 		state.reasoningEffort = strings.TrimSpace(*reasoningEffort)
 	}
 	return state
-}
-
-func findResumableThread(ctx context.Context, backend appServerSession, sessionID acp.SessionId) (appServerThread, error) {
-	targetSessionID := strings.TrimSpace(string(sessionID))
-	if targetSessionID == "" {
-		return appServerThread{}, acp.NewInvalidParams("sessionId is required")
-	}
-
-	for _, archived := range []bool{false, true} {
-		thread, found, err := findResumableThreadPage(ctx, backend, targetSessionID, archived)
-		if err != nil {
-			return appServerThread{}, err
-		}
-		if found {
-			return thread, nil
-		}
-	}
-
-	return appServerThread{}, acp.NewInvalidParams("session not found")
-}
-
-func findResumableThreadPage(
-	ctx context.Context,
-	backend appServerSession,
-	targetSessionID string,
-	archived bool,
-) (appServerThread, bool, error) {
-	cursor := ""
-	hasCursor := false
-	seenCursors := make(map[string]struct{}, 4)
-	var fallback appServerThread
-
-	for {
-		params := map[string]any{
-			"archived":    archived,
-			"limit":       100,
-			"sourceKinds": []string{"appServer"},
-		}
-		if hasCursor {
-			params["cursor"] = cursor
-		}
-
-		resp, err := backend.ThreadList(ctx, params)
-		if err != nil {
-			return appServerThread{}, false, fmt.Errorf("thread/list: %w", err)
-		}
-		for _, thread := range resp.Data {
-			if strings.TrimSpace(thread.SessionID) == targetSessionID {
-				return thread, true, nil
-			}
-			if strings.TrimSpace(thread.ID) == targetSessionID && strings.TrimSpace(fallback.ID) == "" {
-				fallback = thread
-			}
-		}
-
-		if resp.NextCursor == nil {
-			break
-		}
-		nextCursor := strings.TrimSpace(*resp.NextCursor)
-		if nextCursor == "" {
-			break
-		}
-		if _, seen := seenCursors[nextCursor]; seen {
-			return appServerThread{}, false, fmt.Errorf("thread/list: repeated cursor %q", nextCursor)
-		}
-		seenCursors[nextCursor] = struct{}{}
-		cursor = nextCursor
-		hasCursor = true
-	}
-
-	if strings.TrimSpace(fallback.ID) != "" {
-		return fallback, true, nil
-	}
-	return appServerThread{}, false, nil
 }
 
 func (a *codexACPProxyAgent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
@@ -928,7 +845,6 @@ func (a *codexACPProxyAgent) ensureSessionThread(ctx context.Context, sessionID 
 	if !ok {
 		return acp.NewInvalidParams("session not found")
 	}
-	state.backendSessionID = strings.TrimSpace(startResp.Thread.SessionID)
 	state.threadID = strings.TrimSpace(startResp.Thread.ID)
 	if strings.TrimSpace(state.model) == "" {
 		state.model = strings.TrimSpace(startResp.Model)

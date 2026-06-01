@@ -84,9 +84,10 @@ acp-repl -- codex-acp-bridge
   - `--reasoning-thoughts=off` opts out all reasoning delta notifications.
 - Opens ACP agent-side stdio connection for clients.
 - Creates one backend session per ACP session.
-- `session/new` returns the app-server session tree id (`thread.sessionId`) as the ACP `sessionId`.
-- Supports ACP `session/resume` using app-server `thread/list` + `thread/resume`.
+- `session/new` returns the app-server thread id (`thread.id`) as the ACP `sessionId`.
+- Supports ACP `session/resume` using direct app-server `thread/resume`.
   - `session/resume` restores session state only; it does not replay prior ACP message/thought/tool updates.
+  - `thread.sessionId` remains a backend session-tree identifier; it is not the ACP resume handle.
   - ACP `session/load` is not implemented because the bridge does not replay prior conversation history as required by the protocol.
 - Reads per-session Codex defaults from `session/new.params._meta.codex` (strictly validated).
 - Supports ACP cancellation via `session/cancel`.

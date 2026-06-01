@@ -54,6 +54,9 @@ func sessionConfigFromMeta(method string, meta any, defaults codexAppConfig) (co
 		return codexAppConfig{}, fmt.Errorf("%s _meta.codex must be an object", method)
 	}
 	for key := range codexMap {
+		if key == "mcp" {
+			continue
+		}
 		if _, allowed := sessionCodexMetaKeys[key]; !allowed {
 			return codexAppConfig{}, fmt.Errorf("%s _meta.codex.%s is not supported", method, key)
 		}

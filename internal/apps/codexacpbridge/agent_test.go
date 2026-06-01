@@ -161,7 +161,7 @@ func TestNewSessionAppliesCodexMetaOverridesToThreadStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession() error = %v", err)
 	}
-	if got, want := string(resp.SessionId), "backend-session-1"; got != want {
+	if got, want := string(resp.SessionId), "thr-1"; got != want {
 		t.Fatalf("NewSession().SessionId = %q, want %q", got, want)
 	}
 	meta := resp.Meta
@@ -558,15 +558,8 @@ func TestLoadSessionReturnsMethodNotFound(t *testing.T) {
 	}
 }
 
-func TestResumeSessionFallsBackToLegacyThreadID(t *testing.T) {
+func TestResumeSessionUsesACPIDAsThreadID(t *testing.T) {
 	session := newFakeAppServerSession("codex_test/1.0.0", "thr-legacy", "turn-1")
-	session.threadListResponses = []appServerThreadListResponse{
-		{
-			Data: []appServerThread{
-				{ID: "thr-legacy", SessionID: "sess-new"},
-			},
-		},
-	}
 	session.threadResumeResp.Thread.ID = "thr-legacy"
 	session.threadResumeResp.Thread.SessionID = "sess-new"
 
@@ -588,6 +581,35 @@ func TestResumeSessionFallsBackToLegacyThreadID(t *testing.T) {
 	}
 	if got := stringValue(threadResumeParams[0], "threadId"); got != "thr-legacy" {
 		t.Fatalf("thread/resume threadId = %q, want %q", got, "thr-legacy")
+	}
+	if session.threadListCalls != 0 {
+		t.Fatalf("thread/list calls = %d, want 0", session.threadListCalls)
+	}
+}
+
+func TestResumeSessionAcceptsPriorBridgeMCPMeta(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-live", "turn-1")
+	session.threadResumeResp.Thread.ID = "thr-live"
+	session.threadResumeResp.Thread.SessionID = "sess-tree-1"
+
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+
+	_, err := agent.ResumeSession(context.Background(), acp.ResumeSessionRequest{
+		SessionId: "thr-live",
+		Cwd:       "/tmp/work",
+		Meta: map[string]any{
+			"codex": map[string]any{
+				"mcp": map[string]any{
+					"contract": "merge",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ResumeSession() error = %v", err)
 	}
 }
 
