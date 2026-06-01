@@ -25,6 +25,7 @@ profiles:
       npm:
         package: '@normahq/codex-acp-bridge'
         registry: https://registry.npmjs.org
+        publish-auth: trusted
         access: public
         include-readme: true
         keywords:

@@ -16,6 +16,8 @@ jobs:
         with:
           go-version-file: "go.mod"
       - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
       - name: Install omnidist
         run: npm install -g '@omnidist/omnidist@0.1.25'
       - name: Build artifacts
@@ -47,6 +49,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
       - name: Install omnidist
         run: npm install -g '@omnidist/omnidist@0.1.25'
       - name: Download staged artifacts
