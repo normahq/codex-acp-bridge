@@ -43,8 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    env:
-      NPM_PUBLISH_TOKEN: ${{ secrets.NPM_PUBLISH_TOKEN }}
+      id-token: write
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v4
