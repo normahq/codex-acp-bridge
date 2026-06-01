@@ -16,8 +16,7 @@ func TestSessionConfigFromNewSessionMetaParsesCodexOverrides(t *testing.T) {
 		},
 	}
 
-	sessionID, cfg, err := sessionConfigFromNewSessionMeta(map[string]any{
-		"sessionId": "sess-1",
+	_, cfg, err := sessionConfigFromNewSessionMeta(map[string]any{
 		"codex": map[string]any{
 			"sandbox":               "workspace-write",
 			"approvalPolicy":        "on-request",
@@ -38,9 +37,6 @@ func TestSessionConfigFromNewSessionMetaParsesCodexOverrides(t *testing.T) {
 	}, defaultCfg)
 	if err != nil {
 		t.Fatalf("sessionConfigFromNewSessionMeta() error = %v", err)
-	}
-	if sessionID != "sess-1" {
-		t.Fatalf("sessionID = %q, want %q", sessionID, "sess-1")
 	}
 	if cfg.Sandbox != "workspace-write" {
 		t.Fatalf("cfg.Sandbox = %q, want %q", cfg.Sandbox, "workspace-write")

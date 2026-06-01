@@ -23,137 +23,133 @@ var sessionCodexMetaKeys = map[string]struct{}{
 }
 
 func sessionConfigFromNewSessionMeta(meta any, defaults codexAppConfig) (acp.SessionId, codexAppConfig, error) {
+	cfg, err := sessionConfigFromMeta("session/new", meta, defaults)
+	if err != nil {
+		return "", codexAppConfig{}, err
+	}
+	return "", cfg, nil
+}
+
+func sessionConfigFromMeta(method string, meta any, defaults codexAppConfig) (codexAppConfig, error) {
 	cfg := defaults.clone()
 	if meta == nil {
-		return "", cfg, nil
+		return cfg, nil
 	}
 	metaMap, ok := meta.(map[string]any)
 	if !ok {
-		return "", codexAppConfig{}, fmt.Errorf("session/new _meta must be an object")
+		return codexAppConfig{}, fmt.Errorf("%s _meta must be an object", method)
 	}
 
-	sessionID := acp.SessionId("")
-	if rawSessionID, hasSessionID := metaMap["sessionId"]; hasSessionID {
-		sessionIDText, ok := rawSessionID.(string)
-		if !ok {
-			return "", codexAppConfig{}, fmt.Errorf("session/new _meta.sessionId must be a string")
-		}
-		trimmed := strings.TrimSpace(sessionIDText)
-		if trimmed == "" {
-			return "", codexAppConfig{}, fmt.Errorf("session/new _meta.sessionId must not be empty")
-		}
-		sessionID = acp.SessionId(trimmed)
+	if _, hasSessionID := metaMap["sessionId"]; hasSessionID {
+		return codexAppConfig{}, fmt.Errorf("%s _meta.sessionId is not supported", method)
 	}
 
 	rawCodex, hasCodex := metaMap["codex"]
-	if !hasCodex {
-		return sessionID, cfg, nil
-	}
-	if rawCodex == nil {
-		return sessionID, cfg, nil
+	if !hasCodex || rawCodex == nil {
+		return cfg, nil
 	}
 
 	codexMap, ok := rawCodex.(map[string]any)
 	if !ok {
-		return "", codexAppConfig{}, fmt.Errorf("session/new _meta.codex must be an object")
+		return codexAppConfig{}, fmt.Errorf("%s _meta.codex must be an object", method)
 	}
 	for key := range codexMap {
 		if _, allowed := sessionCodexMetaKeys[key]; !allowed {
-			return "", codexAppConfig{}, fmt.Errorf("session/new _meta.codex.%s is not supported", key)
+			return codexAppConfig{}, fmt.Errorf("%s _meta.codex.%s is not supported", method, key)
 		}
 	}
 
 	var err error
 	if value, exists := codexMap["sandbox"]; exists {
-		cfg.Sandbox, err = optionalMetaString("session/new _meta.codex.sandbox", value)
+		cfg.Sandbox, err = optionalMetaString(method+" _meta.codex.sandbox", value)
 		if err != nil {
-			return "", codexAppConfig{}, err
+			return codexAppConfig{}, err
 		}
 	}
 	if value, exists := codexMap["approvalPolicy"]; exists {
-		cfg.ApprovalPolicy, err = optionalMetaString("session/new _meta.codex.approvalPolicy", value)
+		cfg.ApprovalPolicy, err = optionalMetaString(method+" _meta.codex.approvalPolicy", value)
 		if err != nil {
-			return "", codexAppConfig{}, err
+			return codexAppConfig{}, err
 		}
 	}
 	if value, exists := codexMap["baseInstructions"]; exists {
-		cfg.BaseInstructions, err = optionalMetaString("session/new _meta.codex.baseInstructions", value)
+		cfg.BaseInstructions, err = optionalMetaString(method+" _meta.codex.baseInstructions", value)
 		if err != nil {
-			return "", codexAppConfig{}, err
+			return codexAppConfig{}, err
 		}
 	}
 	if value, exists := codexMap["developerInstructions"]; exists {
-		cfg.DeveloperInstructions, err = optionalMetaString("session/new _meta.codex.developerInstructions", value)
+		cfg.DeveloperInstructions, err = optionalMetaString(method+" _meta.codex.developerInstructions", value)
 		if err != nil {
-			return "", codexAppConfig{}, err
+			return codexAppConfig{}, err
 		}
 	}
 	if value, exists := codexMap["profile"]; exists {
-		cfg.Profile, err = optionalMetaString("session/new _meta.codex.profile", value)
+		cfg.Profile, err = optionalMetaString(method+" _meta.codex.profile", value)
 		if err != nil {
-			return "", codexAppConfig{}, err
+			return codexAppConfig{}, err
 		}
 	}
 	if value, exists := codexMap["compactPrompt"]; exists {
-		cfg.CompactPrompt, err = optionalMetaString("session/new _meta.codex.compactPrompt", value)
+		cfg.CompactPrompt, err = optionalMetaString(method+" _meta.codex.compactPrompt", value)
 		if err != nil {
-			return "", codexAppConfig{}, err
+			return codexAppConfig{}, err
 		}
 	}
 	if value, exists := codexMap["config"]; exists {
-		cfg.Config, err = optionalMetaObject("session/new _meta.codex.config", value)
+		cfg.Config, err = optionalMetaObject(method+" _meta.codex.config", value)
 		if err != nil {
-			return "", codexAppConfig{}, err
+			return codexAppConfig{}, err
 		}
 	}
 	if value, exists := codexMap["approvalsReviewer"]; exists {
-		cfg.ApprovalsReviewer, err = optionalMetaString("session/new _meta.codex.approvalsReviewer", value)
+		cfg.ApprovalsReviewer, err = optionalMetaString(method+" _meta.codex.approvalsReviewer", value)
 		if err != nil {
-			return "", codexAppConfig{}, err
+			return codexAppConfig{}, err
 		}
 	}
 	if value, exists := codexMap["personality"]; exists {
-		cfg.Personality, err = optionalMetaString("session/new _meta.codex.personality", value)
+		cfg.Personality, err = optionalMetaString(method+" _meta.codex.personality", value)
 		if err != nil {
-			return "", codexAppConfig{}, err
+			return codexAppConfig{}, err
 		}
 	}
 	if value, exists := codexMap["serviceTier"]; exists {
-		cfg.ServiceTier, err = optionalMetaString("session/new _meta.codex.serviceTier", value)
+		cfg.ServiceTier, err = optionalMetaString(method+" _meta.codex.serviceTier", value)
 		if err != nil {
-			return "", codexAppConfig{}, err
+			return codexAppConfig{}, err
 		}
 	}
 	if value, exists := codexMap["modelProvider"]; exists {
-		cfg.ModelProvider, err = optionalMetaString("session/new _meta.codex.modelProvider", value)
+		cfg.ModelProvider, err = optionalMetaString(method+" _meta.codex.modelProvider", value)
 		if err != nil {
-			return "", codexAppConfig{}, err
+			return codexAppConfig{}, err
 		}
 	}
 	if value, exists := codexMap["ephemeral"]; exists {
-		cfg.Ephemeral, err = optionalMetaBool("session/new _meta.codex.ephemeral", value)
+		cfg.Ephemeral, err = optionalMetaBool(method+" _meta.codex.ephemeral", value)
 		if err != nil {
-			return "", codexAppConfig{}, err
+			return codexAppConfig{}, err
 		}
 	}
 
 	if err := validateEnumValue("codex approval policy", cfg.ApprovalPolicy, validCodexApprovalPolicies); err != nil {
-		return "", codexAppConfig{}, err
+		return codexAppConfig{}, err
 	}
 	if err := validateEnumValue("codex sandbox", cfg.Sandbox, validCodexSandboxModes); err != nil {
-		return "", codexAppConfig{}, err
+		return codexAppConfig{}, err
 	}
 	if err := validateEnumValue("codex approvals reviewer", cfg.ApprovalsReviewer, validCodexApprovalsReviewers); err != nil {
-		return "", codexAppConfig{}, err
+		return codexAppConfig{}, err
 	}
 	if err := validateEnumValue("codex personality", cfg.Personality, validCodexPersonalities); err != nil {
-		return "", codexAppConfig{}, err
+		return codexAppConfig{}, err
 	}
 	if err := validateEnumValue("codex service tier", cfg.ServiceTier, validCodexServiceTiers); err != nil {
-		return "", codexAppConfig{}, err
+		return codexAppConfig{}, err
 	}
 
-	return sessionID, cfg, nil
+	return cfg, nil
 }
 
 func optionalMetaString(label string, value any) (string, error) {

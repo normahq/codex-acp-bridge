@@ -18,17 +18,19 @@ const testModelGPT54 = "gpt-5.4"
 const (
 	testApprovalOnRequest      = "on-request"
 	testApprovalsReviewerGuard = "guardian_subagent"
+	testCWD                    = "/tmp/work"
 	testMCPTransportStdio      = "stdio"
 	testPersonalityPragmatic   = "pragmatic"
 	testPlanRunTests           = "Run tests"
 	testReasoningXHigh         = "xhigh"
 	testServiceTierFlex        = "flex"
+	testThreadLive             = "thr-live"
 )
 
 func TestBuildThreadStartParamsIncludesConfigAndMCPServers(t *testing.T) {
 	ephemeral := true
 	params := buildThreadStartParams(
-		"/tmp/work",
+		testCWD,
 		codexAppConfig{
 			ApprovalPolicy:    testApprovalOnRequest,
 			ApprovalsReviewer: testApprovalsReviewerGuard,
@@ -58,8 +60,8 @@ func TestBuildThreadStartParamsIncludesConfigAndMCPServers(t *testing.T) {
 		},
 	)
 
-	if got := stringValue(params, "cwd"); got != "/tmp/work" {
-		t.Fatalf("cwd = %q, want %q", got, "/tmp/work")
+	if got := stringValue(params, "cwd"); got != testCWD {
+		t.Fatalf("cwd = %q, want %q", got, testCWD)
 	}
 	if got := stringValue(params, "model"); got != testModelGPT54 {
 		t.Fatalf("model = %q, want %q", got, testModelGPT54)
@@ -96,6 +98,7 @@ func TestBuildThreadStartParamsIncludesConfigAndMCPServers(t *testing.T) {
 
 func TestNewSessionAppliesCodexMetaOverridesToThreadStart(t *testing.T) {
 	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	session.threadStartResp.Thread.SessionID = "backend-session-1"
 	l := zerolog.Nop()
 	defaultEphemeral := false
 	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
@@ -123,7 +126,6 @@ func TestNewSessionAppliesCodexMetaOverridesToThreadStart(t *testing.T) {
 	resp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{
 		Cwd: "/tmp/work",
 		Meta: map[string]any{
-			"sessionId": "session-meta-1",
 			"codex": map[string]any{
 				"sandbox":               "workspace-write",
 				"approvalPolicy":        testApprovalOnRequest,
@@ -159,7 +161,7 @@ func TestNewSessionAppliesCodexMetaOverridesToThreadStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession() error = %v", err)
 	}
-	if got, want := string(resp.SessionId), "session-meta-1"; got != want {
+	if got, want := string(resp.SessionId), "backend-session-1"; got != want {
 		t.Fatalf("NewSession().SessionId = %q, want %q", got, want)
 	}
 	meta := resp.Meta
@@ -240,6 +242,30 @@ func TestNewSessionAppliesCodexMetaOverridesToThreadStart(t *testing.T) {
 	}
 }
 
+func TestNewSessionRejectsCustomSessionIDMeta(t *testing.T) {
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1"), nil
+	}, "agent", codexAppConfig{}, &l)
+
+	_, err := agent.NewSession(context.Background(), acp.NewSessionRequest{
+		Cwd: "/tmp/work",
+		Meta: map[string]any{
+			"sessionId": "session-meta-1",
+		},
+	})
+	if err == nil {
+		t.Fatal("NewSession() error = nil, want non-nil")
+	}
+	reqErr := &acp.RequestError{}
+	if !errors.As(err, &reqErr) {
+		t.Fatalf("NewSession() error type = %T, want *acp.RequestError", err)
+	}
+	if reqErr.Code != -32602 {
+		t.Fatalf("NewSession() request error code = %d, want -32602", reqErr.Code)
+	}
+}
+
 func TestNewSessionRejectsUnsupportedCodexMetaKey(t *testing.T) {
 	l := zerolog.Nop()
 	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
@@ -282,6 +308,12 @@ func TestInitializeAdvertisesImagePromptCapability(t *testing.T) {
 	if resp.AgentCapabilities.PromptCapabilities.Audio {
 		t.Fatal("prompt audio capability = true, want false")
 	}
+	if !resp.AgentCapabilities.LoadSession {
+		t.Fatal("loadSession = false, want true")
+	}
+	if resp.AgentCapabilities.SessionCapabilities.Resume == nil {
+		t.Fatal("sessionCapabilities.resume = nil, want non-nil")
+	}
 }
 
 func TestSessionModeIsStoredButNotForwardedToBackendPayloads(t *testing.T) {
@@ -319,6 +351,13 @@ func TestSessionModeIsStoredButNotForwardedToBackendPayloads(t *testing.T) {
 		ModelId:   acp.UnstableModelId("gpt-5.5"),
 	}); err != nil {
 		t.Fatalf("UnstableSetSessionModel() error = %v", err)
+	}
+	settingsUpdates := session.settingsUpdateParamsSnapshot()
+	if len(settingsUpdates) != 1 {
+		t.Fatalf("thread/settings/update calls = %d, want 1", len(settingsUpdates))
+	}
+	if got := stringValue(settingsUpdates[0], "model"); got != "gpt-5.5" {
+		t.Fatalf("thread/settings/update model = %q, want %q", got, "gpt-5.5")
 	}
 
 	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
@@ -496,6 +535,125 @@ func TestNewSessionIncludesModelsFromModelList(t *testing.T) {
 	}
 }
 
+func TestLoadSessionResumesExistingBackendSession(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", testThreadLive, "turn-1")
+	session.threadListResponses = []appServerThreadListResponse{
+		{
+			Data: []appServerThread{
+				{ID: "thr-archived", SessionID: "other-session"},
+				{ID: testThreadLive, SessionID: "sess-load-1"},
+			},
+		},
+	}
+	session.threadResumeResp.Thread.ID = testThreadLive
+	session.threadResumeResp.Thread.SessionID = "sess-load-1"
+	session.threadResumeResp.Model = testModelGPT54
+	session.modelListResponses = []appServerModelListResponse{
+		{
+			Data: []appServerModel{
+				{ID: testModelGPT54, DisplayName: "GPT-5.4", IsDefault: true},
+			},
+		},
+	}
+
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+
+	resp, err := agent.LoadSession(context.Background(), acp.LoadSessionRequest{
+		SessionId:  "sess-load-1",
+		Cwd:        testCWD,
+		McpServers: []acp.McpServer{},
+	})
+	if err != nil {
+		t.Fatalf("LoadSession() error = %v", err)
+	}
+	if resp.Models == nil {
+		t.Fatal("LoadSession().Models = nil, want non-nil")
+	}
+	if got := string(resp.Models.CurrentModelId); got != testModelGPT54 {
+		t.Fatalf("LoadSession().Models.CurrentModelId = %q, want %q", got, testModelGPT54)
+	}
+	threadListParams := session.threadListParamsSnapshot()
+	if len(threadListParams) != 1 {
+		t.Fatalf("thread/list calls = %d, want 1", len(threadListParams))
+	}
+	threadResumeParams := session.threadResumeParamsSnapshot()
+	if len(threadResumeParams) != 1 {
+		t.Fatalf("thread/resume calls = %d, want 1", len(threadResumeParams))
+	}
+	if got := stringValue(threadResumeParams[0], "threadId"); got != testThreadLive {
+		t.Fatalf("thread/resume threadId = %q, want %q", got, testThreadLive)
+	}
+	if got, ok := boolValue(threadResumeParams[0], "excludeTurns"); !ok || !got {
+		t.Fatalf("thread/resume excludeTurns = %t (ok=%t), want true", got, ok)
+	}
+
+	agent.mu.Lock()
+	state := agent.sessions["sess-load-1"]
+	agent.mu.Unlock()
+	if state == nil {
+		t.Fatal("loaded session state = nil, want non-nil")
+	}
+	if got := state.threadID; got != testThreadLive {
+		t.Fatalf("loaded session threadID = %q, want %q", got, testThreadLive)
+	}
+}
+
+func TestResumeSessionFallsBackToLegacyThreadID(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-legacy", "turn-1")
+	session.threadListResponses = []appServerThreadListResponse{
+		{
+			Data: []appServerThread{
+				{ID: "thr-legacy", SessionID: "sess-new"},
+			},
+		},
+	}
+	session.threadResumeResp.Thread.ID = "thr-legacy"
+	session.threadResumeResp.Thread.SessionID = "sess-new"
+
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+
+	_, err := agent.ResumeSession(context.Background(), acp.ResumeSessionRequest{
+		SessionId: "thr-legacy",
+		Cwd:       "/tmp/work",
+	})
+	if err != nil {
+		t.Fatalf("ResumeSession() error = %v", err)
+	}
+	threadResumeParams := session.threadResumeParamsSnapshot()
+	if len(threadResumeParams) != 1 {
+		t.Fatalf("thread/resume calls = %d, want 1", len(threadResumeParams))
+	}
+	if got := stringValue(threadResumeParams[0], "threadId"); got != "thr-legacy" {
+		t.Fatalf("thread/resume threadId = %q, want %q", got, "thr-legacy")
+	}
+}
+
+func TestLoadSessionRejectsAdditionalDirectories(t *testing.T) {
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1"), nil
+	}, "agent", codexAppConfig{}, &l)
+
+	_, err := agent.LoadSession(context.Background(), acp.LoadSessionRequest{
+		SessionId:             "sess-load-1",
+		Cwd:                   "/tmp/work",
+		McpServers:            []acp.McpServer{},
+		AdditionalDirectories: []string{"/tmp/extra"},
+	})
+	if err == nil {
+		t.Fatal("LoadSession() error = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), "additionalDirectories is not supported") {
+		t.Fatalf("LoadSession() error = %v, want unsupported additionalDirectories", err)
+	}
+}
+
 func TestNewSessionIncludesReasoningEffortConfigOptionsFromModelList(t *testing.T) {
 	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
 	session.modelListResponses = []appServerModelListResponse{
@@ -577,6 +735,13 @@ func TestSetSessionConfigOptionReasoningEffortAppliesToNextTurn(t *testing.T) {
 	option := requireReasoningEffortOption(t, setResp.ConfigOptions)
 	if got := option.CurrentValue; got != acp.SessionConfigValueId(testReasoningXHigh) {
 		t.Fatalf("reasoning current value = %q, want xhigh", got)
+	}
+	settingsUpdates := session.settingsUpdateParamsSnapshot()
+	if len(settingsUpdates) != 1 {
+		t.Fatalf("thread/settings/update calls = %d, want 1", len(settingsUpdates))
+	}
+	if got := stringValue(settingsUpdates[0], "effort"); got != testReasoningXHigh {
+		t.Fatalf("thread/settings/update effort = %q, want %q", got, testReasoningXHigh)
 	}
 
 	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
@@ -3262,29 +3427,41 @@ type fakeAppServerSession struct {
 	pendingEvents  []appServerEvent
 	turnStarted    bool
 
-	threadStartResp appServerThreadStartResponse
-	turnStartResp   appServerTurnStartResponse
-	modelListErr    error
+	threadStartResp  appServerThreadStartResponse
+	threadResumeResp appServerThreadResumeResponse
+	turnStartResp    appServerTurnStartResponse
+	threadListErr    error
+	modelListErr     error
 
-	threadStartParams  []map[string]any
-	turnStartParams    []map[string]any
-	modelListParams    []map[string]any
-	modelListCalls     int
-	modelListResponses []appServerModelListResponse
-	responses          []map[string]any
-	errorResponses     []map[string]any
+	threadListParams     []map[string]any
+	threadStartParams    []map[string]any
+	threadResumeParams   []map[string]any
+	settingsUpdateParams []map[string]any
+	turnStartParams      []map[string]any
+	modelListParams      []map[string]any
+	threadListCalls      int
+	threadListResponses  []appServerThreadListResponse
+	modelListCalls       int
+	modelListResponses   []appServerModelListResponse
+	responses            []map[string]any
+	errorResponses       []map[string]any
 }
 
 func newFakeAppServerSession(userAgent string, threadID string, turnID string) *fakeAppServerSession {
 	threadResp := appServerThreadStartResponse{}
 	threadResp.Thread.ID = threadID
+	threadResp.Thread.SessionID = threadID
+	threadResumeResp := appServerThreadResumeResponse{}
+	threadResumeResp.Thread.ID = threadID
+	threadResumeResp.Thread.SessionID = threadID
 	turnResp := appServerTurnStartResponse{}
 	turnResp.Turn.ID = turnID
 	return &fakeAppServerSession{
-		initializeResp:  appServerInitializeResponse{UserAgent: userAgent},
-		events:          make(chan appServerEvent, 64),
-		threadStartResp: threadResp,
-		turnStartResp:   turnResp,
+		initializeResp:   appServerInitializeResponse{UserAgent: userAgent},
+		events:           make(chan appServerEvent, 64),
+		threadStartResp:  threadResp,
+		threadResumeResp: threadResumeResp,
+		turnStartResp:    turnResp,
 	}
 }
 
@@ -3317,16 +3494,46 @@ func (f *fakeAppServerSession) Events() <-chan appServerEvent {
 	return f.events
 }
 
+func (f *fakeAppServerSession) ThreadList(_ context.Context, params map[string]any) (appServerThreadListResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.threadListParams = append(f.threadListParams, cloneAnyMap(params))
+	if f.threadListErr != nil {
+		return appServerThreadListResponse{}, f.threadListErr
+	}
+	if f.threadListCalls >= len(f.threadListResponses) {
+		f.threadListCalls++
+		return appServerThreadListResponse{}, nil
+	}
+	resp := f.threadListResponses[f.threadListCalls]
+	f.threadListCalls++
+	return resp, nil
+}
+
 func (f *fakeAppServerSession) ThreadStart(_ context.Context, params map[string]any) (appServerThreadStartResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.threadStartParams = append(f.threadStartParams, params)
+	f.threadStartParams = append(f.threadStartParams, cloneAnyMap(params))
 	return f.threadStartResp, nil
+}
+
+func (f *fakeAppServerSession) ThreadResume(_ context.Context, params map[string]any) (appServerThreadResumeResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.threadResumeParams = append(f.threadResumeParams, cloneAnyMap(params))
+	return f.threadResumeResp, nil
+}
+
+func (f *fakeAppServerSession) ThreadSettingsUpdate(_ context.Context, params map[string]any) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.settingsUpdateParams = append(f.settingsUpdateParams, cloneAnyMap(params))
+	return nil
 }
 
 func (f *fakeAppServerSession) TurnStart(_ context.Context, params map[string]any) (appServerTurnStartResponse, error) {
 	f.mu.Lock()
-	f.turnStartParams = append(f.turnStartParams, params)
+	f.turnStartParams = append(f.turnStartParams, cloneAnyMap(params))
 	f.turnStarted = true
 	pending := append([]appServerEvent(nil), f.pendingEvents...)
 	f.pendingEvents = nil
@@ -3421,6 +3628,30 @@ func (f *fakeAppServerSession) modelListParamsSnapshot() []map[string]any {
 	defer f.mu.Unlock()
 	out := make([]map[string]any, len(f.modelListParams))
 	copy(out, f.modelListParams)
+	return out
+}
+
+func (f *fakeAppServerSession) threadListParamsSnapshot() []map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]map[string]any, len(f.threadListParams))
+	copy(out, f.threadListParams)
+	return out
+}
+
+func (f *fakeAppServerSession) threadResumeParamsSnapshot() []map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]map[string]any, len(f.threadResumeParams))
+	copy(out, f.threadResumeParams)
+	return out
+}
+
+func (f *fakeAppServerSession) settingsUpdateParamsSnapshot() []map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]map[string]any, len(f.settingsUpdateParams))
+	copy(out, f.settingsUpdateParams)
 	return out
 }
 

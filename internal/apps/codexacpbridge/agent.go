@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 
 	acp "github.com/coder/acp-go-sdk"
 	"github.com/rs/zerolog"
@@ -74,10 +73,9 @@ type codexACPProxyAgent struct {
 	connMu sync.RWMutex
 	conn   codexACPConnection
 
-	mu            sync.Mutex
-	sessions      map[acp.SessionId]*codexProxySessionState
-	nextSessionID uint64
-	shuttingDown  bool
+	mu           sync.Mutex
+	sessions     map[acp.SessionId]*codexProxySessionState
+	shuttingDown bool
 }
 
 type promptCompletion struct {
@@ -109,15 +107,16 @@ type planItemState struct {
 }
 
 type codexProxySessionState struct {
-	cwd             string
-	config          codexAppConfig
-	threadID        string
-	turnID          string
-	model           string
-	mode            string
-	reasoningEffort string
-	mcpServers      map[string]acp.McpServer
-	mcpStartup      map[string]sessionMCPStartup
+	cwd              string
+	backendSessionID string
+	config           codexAppConfig
+	threadID         string
+	turnID           string
+	model            string
+	mode             string
+	reasoningEffort  string
+	mcpServers       map[string]acp.McpServer
+	mcpStartup       map[string]sessionMCPStartup
 
 	backend appServerSession
 	cancel  context.CancelFunc
@@ -194,7 +193,7 @@ func (a *codexACPProxyAgent) Initialize(_ context.Context, _ acp.InitializeReque
 			Version: a.agentVersion,
 		},
 		AgentCapabilities: acp.AgentCapabilities{
-			LoadSession: false,
+			LoadSession: true,
 			McpCapabilities: acp.McpCapabilities{
 				Http: true,
 				Sse:  false,
@@ -203,6 +202,9 @@ func (a *codexACPProxyAgent) Initialize(_ context.Context, _ acp.InitializeReque
 				Audio:           false,
 				Image:           true,
 				EmbeddedContext: false,
+			},
+			SessionCapabilities: acp.SessionCapabilities{
+				Resume: &acp.SessionResumeCapabilities{},
 			},
 		},
 		AuthMethods: []acp.AuthMethod{},
@@ -235,17 +237,20 @@ func (a *codexACPProxyAgent) ListSessions(_ context.Context, _ acp.ListSessionsR
 	return acp.ListSessionsResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionList)
 }
 
+func (a *codexACPProxyAgent) CloseSession(
+	_ context.Context,
+	_ acp.CloseSessionRequest,
+) (acp.CloseSessionResponse, error) {
+	return acp.CloseSessionResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionClose)
+}
+
 func (a *codexACPProxyAgent) NewSession(ctx context.Context, params acp.NewSessionRequest) (acp.NewSessionResponse, error) {
 	if err := a.rejectIfShuttingDown(); err != nil {
 		return acp.NewSessionResponse{}, err
 	}
-	requestedSessionID, sessionConfig, err := sessionConfigFromNewSessionMeta(params.Meta, a.defaultConfig)
+	sessionConfig, err := sessionConfigFromMeta("session/new", params.Meta, a.defaultConfig)
 	if err != nil {
 		return acp.NewSessionResponse{}, acp.NewInvalidParams(err.Error())
-	}
-	sessionID := requestedSessionID
-	if sessionID == "" {
-		sessionID = acp.SessionId(fmt.Sprintf("session-%d", atomic.AddUint64(&a.nextSessionID, 1)))
 	}
 	var mcpServers map[string]acp.McpServer
 	if len(params.McpServers) > 0 {
@@ -255,48 +260,13 @@ func (a *codexACPProxyAgent) NewSession(ctx context.Context, params acp.NewSessi
 		}
 	}
 
-	a.mu.Lock()
-	if a.shuttingDown {
-		a.mu.Unlock()
-		return acp.NewSessionResponse{}, errors.New(errBridgeShuttingDown)
-	}
-	if _, exists := a.sessions[sessionID]; exists {
-		a.mu.Unlock()
-		return acp.NewSessionResponse{}, acp.NewInvalidParams(fmt.Sprintf("session %q already exists", sessionID))
-	}
-	a.sessions[sessionID] = &codexProxySessionState{
-		cwd:        strings.TrimSpace(params.Cwd),
-		config:     sessionConfig,
-		model:      sessionConfig.Model,
-		mcpServers: mcpServers,
-	}
-	a.mu.Unlock()
-
-	if err := a.ensureSessionBackend(ctx, sessionID); err != nil {
-		a.mu.Lock()
-		delete(a.sessions, sessionID)
-		a.mu.Unlock()
+	sessionState, err := a.startNewSession(ctx, strings.TrimSpace(params.Cwd), sessionConfig, mcpServers)
+	if err != nil {
 		return acp.NewSessionResponse{}, err
 	}
-	if err := a.ensureSessionThread(ctx, sessionID); err != nil {
-		var (
-			backend      appServerSession
-			workerCancel context.CancelFunc
-		)
-		a.mu.Lock()
-		if state := a.sessions[sessionID]; state != nil {
-			backend = state.backend
-			workerCancel = state.workerCancel
-		}
-		delete(a.sessions, sessionID)
-		a.mu.Unlock()
-		if workerCancel != nil {
-			workerCancel()
-		}
-		if backend != nil {
-			_ = backend.Close()
-			_ = backend.Wait()
-		}
+	sessionID := acp.SessionId(sessionState.backendSessionID)
+	if err := a.registerSessionState(sessionID, sessionState); err != nil {
+		a.closeSessionState(sessionState)
 		return acp.NewSessionResponse{}, err
 	}
 
@@ -321,6 +291,358 @@ func (a *codexACPProxyAgent) NewSession(ctx context.Context, params acp.NewSessi
 		}
 	}
 	return resp, nil
+}
+
+func (a *codexACPProxyAgent) LoadSession(
+	ctx context.Context,
+	params acp.LoadSessionRequest,
+) (acp.LoadSessionResponse, error) {
+	resp, err := a.restoreSession(
+		ctx,
+		params.SessionId,
+		strings.TrimSpace(params.Cwd),
+		params.McpServers,
+		params.Meta,
+		params.AdditionalDirectories,
+		"session/load",
+	)
+	if err != nil {
+		return acp.LoadSessionResponse{}, err
+	}
+	return resp.LoadResponse(), nil
+}
+
+func (a *codexACPProxyAgent) ResumeSession(
+	ctx context.Context,
+	params acp.ResumeSessionRequest,
+) (acp.ResumeSessionResponse, error) {
+	resp, err := a.restoreSession(
+		ctx,
+		params.SessionId,
+		strings.TrimSpace(params.Cwd),
+		params.McpServers,
+		params.Meta,
+		params.AdditionalDirectories,
+		"session/resume",
+	)
+	if err != nil {
+		return acp.ResumeSessionResponse{}, err
+	}
+	return resp.ResumeResponse(), nil
+}
+
+func (a *codexACPProxyAgent) startNewSession(
+	ctx context.Context,
+	cwd string,
+	sessionConfig codexAppConfig,
+	mcpServers map[string]acp.McpServer,
+) (*codexProxySessionState, error) {
+	backend, err := a.startSessionBackend(ctx, cwd)
+	if err != nil {
+		return nil, err
+	}
+
+	startResp, err := backend.ThreadStart(ctx, buildThreadStartParams(cwd, sessionConfig, sessionConfig.Model, mcpServers))
+	if err != nil {
+		_ = backend.Close()
+		_ = backend.Wait()
+		return nil, fmt.Errorf("thread/start: %w", err)
+	}
+
+	return newSessionStateFromThreadStart(cwd, sessionConfig, mcpServers, backend, startResp), nil
+}
+
+func (a *codexACPProxyAgent) restoreSession(
+	ctx context.Context,
+	sessionID acp.SessionId,
+	cwd string,
+	requestedMCPServers []acp.McpServer,
+	meta map[string]any,
+	additionalDirectories []string,
+	method string,
+) (sessionRestoreResponse, error) {
+	if err := a.rejectIfShuttingDown(); err != nil {
+		return sessionRestoreResponse{}, err
+	}
+	if len(additionalDirectories) > 0 {
+		return sessionRestoreResponse{}, acp.NewInvalidParams("additionalDirectories is not supported")
+	}
+
+	sessionConfig, err := sessionConfigFromMeta(method, meta, a.defaultConfig)
+	if err != nil {
+		return sessionRestoreResponse{}, acp.NewInvalidParams(err.Error())
+	}
+
+	var mcpServers map[string]acp.McpServer
+	if len(requestedMCPServers) > 0 {
+		mcpServers, err = validateMCPServers(requestedMCPServers)
+		if err != nil {
+			return sessionRestoreResponse{}, acp.NewInvalidParams(err.Error())
+		}
+	}
+
+	a.mu.Lock()
+	if a.shuttingDown {
+		a.mu.Unlock()
+		return sessionRestoreResponse{}, errors.New(errBridgeShuttingDown)
+	}
+	if _, exists := a.sessions[sessionID]; exists {
+		a.mu.Unlock()
+		return sessionRestoreResponse{}, acp.NewInvalidParams(fmt.Sprintf("session %q already exists", sessionID))
+	}
+	a.mu.Unlock()
+
+	backend, err := a.startSessionBackend(ctx, cwd)
+	if err != nil {
+		return sessionRestoreResponse{}, err
+	}
+
+	thread, err := findResumableThread(ctx, backend, sessionID)
+	if err != nil {
+		_ = backend.Close()
+		_ = backend.Wait()
+		return sessionRestoreResponse{}, err
+	}
+
+	resumeResp, err := backend.ThreadResume(ctx, buildThreadResumeParams(thread.ID, cwd, sessionConfig, sessionConfig.Model, mcpServers))
+	if err != nil {
+		_ = backend.Close()
+		_ = backend.Wait()
+		return sessionRestoreResponse{}, fmt.Errorf("thread/resume: %w", err)
+	}
+
+	sessionState := newSessionStateFromThreadResume(cwd, sessionConfig, mcpServers, backend, resumeResp)
+	if err := a.registerSessionState(sessionID, sessionState); err != nil {
+		a.closeSessionState(sessionState)
+		return sessionRestoreResponse{}, err
+	}
+
+	modelState, configOptions, err := a.buildSessionModelConfigState(ctx, sessionID)
+	if err != nil {
+		a.logger.Warn().
+			Err(err).
+			Str("session_id", string(sessionID)).
+			Msg("model/list unavailable; continuing without session model config")
+	}
+
+	resp := sessionRestoreResponse{}
+	if modelState != nil {
+		resp.models = modelState
+		resp.configOptions = configOptions
+	}
+	if mcpMeta := a.sessionMCPMeta(sessionID, false); len(mcpMeta) > 0 {
+		resp.meta = map[string]any{
+			"codex": map[string]any{
+				"mcp": mcpMeta,
+			},
+		}
+	}
+	return resp, nil
+}
+
+type sessionRestoreResponse struct {
+	models        *acp.SessionModelState
+	configOptions []acp.SessionConfigOption
+	meta          map[string]any
+}
+
+func (r sessionRestoreResponse) LoadResponse() acp.LoadSessionResponse {
+	return acp.LoadSessionResponse{
+		ConfigOptions: r.configOptions,
+		Meta:          cloneAnyMap(r.meta),
+		Models:        r.models,
+	}
+}
+
+func (r sessionRestoreResponse) ResumeResponse() acp.ResumeSessionResponse {
+	return acp.ResumeSessionResponse{
+		ConfigOptions: r.configOptions,
+		Meta:          cloneAnyMap(r.meta),
+		Models:        r.models,
+	}
+}
+
+func (a *codexACPProxyAgent) startSessionBackend(ctx context.Context, cwd string) (appServerSession, error) {
+	backend, err := a.sessionFactory(ctx, cwd)
+	if err != nil {
+		return nil, fmt.Errorf("create bridge backend backend: %w", err)
+	}
+	return backend, nil
+}
+
+func (a *codexACPProxyAgent) registerSessionState(sessionID acp.SessionId, state *codexProxySessionState) error {
+	if state == nil || state.backend == nil {
+		return errors.New(errSessionBackendUnavailable)
+	}
+	workerCtx, workerCancel := context.WithCancel(context.Background())
+	state.workerCancel = workerCancel
+
+	a.mu.Lock()
+	if a.shuttingDown {
+		a.mu.Unlock()
+		workerCancel()
+		return errors.New(errBridgeShuttingDown)
+	}
+	if _, exists := a.sessions[sessionID]; exists {
+		a.mu.Unlock()
+		workerCancel()
+		return acp.NewInvalidParams(fmt.Sprintf("session %q already exists", sessionID))
+	}
+	a.sessions[sessionID] = state
+	a.mu.Unlock()
+
+	go a.runSessionEventLoop(workerCtx, sessionID, state.backend)
+	return nil
+}
+
+func (a *codexACPProxyAgent) closeSessionState(state *codexProxySessionState) {
+	if state == nil {
+		return
+	}
+	if state.workerCancel != nil {
+		state.workerCancel()
+	}
+	if state.backend != nil {
+		_ = state.backend.Close()
+		_ = state.backend.Wait()
+	}
+}
+
+func newSessionStateFromThreadStart(
+	cwd string,
+	sessionConfig codexAppConfig,
+	mcpServers map[string]acp.McpServer,
+	backend appServerSession,
+	startResp appServerThreadStartResponse,
+) *codexProxySessionState {
+	return newSessionState(
+		cwd,
+		sessionConfig,
+		mcpServers,
+		backend,
+		startResp.Thread,
+		startResp.Model,
+		startResp.ReasoningEffort,
+	)
+}
+
+func newSessionStateFromThreadResume(
+	cwd string,
+	sessionConfig codexAppConfig,
+	mcpServers map[string]acp.McpServer,
+	backend appServerSession,
+	resumeResp appServerThreadResumeResponse,
+) *codexProxySessionState {
+	return newSessionState(
+		cwd,
+		sessionConfig,
+		mcpServers,
+		backend,
+		resumeResp.Thread,
+		resumeResp.Model,
+		resumeResp.ReasoningEffort,
+	)
+}
+
+func newSessionState(
+	cwd string,
+	sessionConfig codexAppConfig,
+	mcpServers map[string]acp.McpServer,
+	backend appServerSession,
+	thread appServerThread,
+	model string,
+	reasoningEffort *string,
+) *codexProxySessionState {
+	state := &codexProxySessionState{
+		cwd:              strings.TrimSpace(cwd),
+		backendSessionID: strings.TrimSpace(thread.SessionID),
+		config:           sessionConfig,
+		threadID:         strings.TrimSpace(thread.ID),
+		model:            sessionConfig.Model,
+		mcpServers:       mcpServers,
+		backend:          backend,
+	}
+	if strings.TrimSpace(state.model) == "" {
+		state.model = strings.TrimSpace(model)
+	}
+	if reasoningEffort != nil {
+		state.reasoningEffort = strings.TrimSpace(*reasoningEffort)
+	}
+	return state
+}
+
+func findResumableThread(ctx context.Context, backend appServerSession, sessionID acp.SessionId) (appServerThread, error) {
+	targetSessionID := strings.TrimSpace(string(sessionID))
+	if targetSessionID == "" {
+		return appServerThread{}, acp.NewInvalidParams("sessionId is required")
+	}
+
+	for _, archived := range []bool{false, true} {
+		thread, found, err := findResumableThreadPage(ctx, backend, targetSessionID, archived)
+		if err != nil {
+			return appServerThread{}, err
+		}
+		if found {
+			return thread, nil
+		}
+	}
+
+	return appServerThread{}, acp.NewInvalidParams("session not found")
+}
+
+func findResumableThreadPage(
+	ctx context.Context,
+	backend appServerSession,
+	targetSessionID string,
+	archived bool,
+) (appServerThread, bool, error) {
+	cursor := ""
+	hasCursor := false
+	seenCursors := make(map[string]struct{}, 4)
+	var fallback appServerThread
+
+	for {
+		params := map[string]any{
+			"archived":    archived,
+			"limit":       100,
+			"sourceKinds": []string{"appServer"},
+		}
+		if hasCursor {
+			params["cursor"] = cursor
+		}
+
+		resp, err := backend.ThreadList(ctx, params)
+		if err != nil {
+			return appServerThread{}, false, fmt.Errorf("thread/list: %w", err)
+		}
+		for _, thread := range resp.Data {
+			if strings.TrimSpace(thread.SessionID) == targetSessionID {
+				return thread, true, nil
+			}
+			if strings.TrimSpace(thread.ID) == targetSessionID && strings.TrimSpace(fallback.ID) == "" {
+				fallback = thread
+			}
+		}
+
+		if resp.NextCursor == nil {
+			break
+		}
+		nextCursor := strings.TrimSpace(*resp.NextCursor)
+		if nextCursor == "" {
+			break
+		}
+		if _, seen := seenCursors[nextCursor]; seen {
+			return appServerThread{}, false, fmt.Errorf("thread/list: repeated cursor %q", nextCursor)
+		}
+		seenCursors[nextCursor] = struct{}{}
+		cursor = nextCursor
+		hasCursor = true
+	}
+
+	if strings.TrimSpace(fallback.ID) != "" {
+		return fallback, true, nil
+	}
+	return appServerThread{}, false, nil
 }
 
 func (a *codexACPProxyAgent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
@@ -502,8 +824,20 @@ func (a *codexACPProxyAgent) UnstableSetSessionModel(
 		a.mu.Unlock()
 		return acp.UnstableSetSessionModelResponse{}, acp.NewInvalidRequest("cannot update session model while prompt is active")
 	}
+	backend := state.backend
+	threadID := state.threadID
+	previousModel := state.model
 	state.model = nextModel
 	a.mu.Unlock()
+
+	if err := persistSessionSettingsUpdate(ctx, backend, threadID, nextModel, ""); err != nil {
+		a.mu.Lock()
+		if state := a.sessions[params.SessionId]; state != nil && state.done == nil && state.model == nextModel {
+			state.model = previousModel
+		}
+		a.mu.Unlock()
+		return acp.UnstableSetSessionModelResponse{}, err
+	}
 
 	_, configOptions, err := a.buildSessionModelConfigState(ctx, params.SessionId)
 	if err != nil {
@@ -615,6 +949,7 @@ func (a *codexACPProxyAgent) ensureSessionThread(ctx context.Context, sessionID 
 	if !ok {
 		return acp.NewInvalidParams("session not found")
 	}
+	state.backendSessionID = strings.TrimSpace(startResp.Thread.SessionID)
 	state.threadID = strings.TrimSpace(startResp.Thread.ID)
 	if strings.TrimSpace(state.model) == "" {
 		state.model = strings.TrimSpace(startResp.Model)
@@ -726,6 +1061,8 @@ func (a *codexACPProxyAgent) setSessionReasoningEffort(
 	}
 	backend := state.backend
 	currentModelID := strings.TrimSpace(state.model)
+	threadID := state.threadID
+	previousEffort := state.reasoningEffort
 	a.mu.Unlock()
 	if backend == nil {
 		return nil, errors.New(errSessionBackendUnavailable)
@@ -755,7 +1092,33 @@ func (a *codexACPProxyAgent) setSessionReasoningEffort(
 		}
 	}
 	a.mu.Unlock()
+
+	if err := persistSessionSettingsUpdate(ctx, backend, threadID, "", selectedEffort); err != nil {
+		a.mu.Lock()
+		if state := a.sessions[sessionID]; state != nil && state.done == nil && state.reasoningEffort == selectedEffort {
+			state.reasoningEffort = previousEffort
+		}
+		a.mu.Unlock()
+		return nil, err
+	}
+
 	return []acp.SessionConfigOption{option}, nil
+}
+
+func persistSessionSettingsUpdate(
+	ctx context.Context,
+	backend appServerSession,
+	threadID string,
+	model string,
+	reasoningEffort string,
+) error {
+	if backend == nil || strings.TrimSpace(threadID) == "" {
+		return nil
+	}
+	if err := backend.ThreadSettingsUpdate(ctx, buildThreadSettingsUpdateParams(threadID, model, reasoningEffort)); err != nil {
+		return fmt.Errorf("thread/settings/update: %w", err)
+	}
+	return nil
 }
 
 func selectAppServerModel(models []appServerModel, modelID string) (appServerModel, bool) {

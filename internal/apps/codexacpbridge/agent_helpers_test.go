@@ -27,8 +27,20 @@ func (s *lifecycleBackendSpy) Events() <-chan appServerEvent {
 	return nil
 }
 
+func (s *lifecycleBackendSpy) ThreadList(context.Context, map[string]any) (appServerThreadListResponse, error) {
+	return appServerThreadListResponse{}, nil
+}
+
 func (s *lifecycleBackendSpy) ThreadStart(context.Context, map[string]any) (appServerThreadStartResponse, error) {
 	return appServerThreadStartResponse{}, nil
+}
+
+func (s *lifecycleBackendSpy) ThreadResume(context.Context, map[string]any) (appServerThreadResumeResponse, error) {
+	return appServerThreadResumeResponse{}, nil
+}
+
+func (s *lifecycleBackendSpy) ThreadSettingsUpdate(context.Context, map[string]any) error {
+	return nil
 }
 
 func (s *lifecycleBackendSpy) TurnStart(context.Context, map[string]any) (appServerTurnStartResponse, error) {

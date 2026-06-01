@@ -19,10 +19,45 @@ const (
 )
 
 func buildThreadStartParams(cwd string, cfg codexAppConfig, sessionModel string, sessionMCPServers map[string]acp.McpServer) map[string]any {
+	params := buildThreadSessionParamsBase(cwd, cfg, sessionModel, sessionMCPServers)
+	params["experimentalRawEvents"] = false
+	params["persistExtendedHistory"] = false
+	return params
+}
+
+func buildThreadResumeParams(
+	threadID string,
+	cwd string,
+	cfg codexAppConfig,
+	sessionModel string,
+	sessionMCPServers map[string]acp.McpServer,
+) map[string]any {
+	params := buildThreadSessionParamsBase(cwd, cfg, sessionModel, sessionMCPServers)
+	params["threadId"] = strings.TrimSpace(threadID)
+	params["excludeTurns"] = true
+	return params
+}
+
+func buildThreadSettingsUpdateParams(threadID string, model string, reasoningEffort string) map[string]any {
 	params := map[string]any{
-		"experimentalRawEvents":  false,
-		"persistExtendedHistory": false,
+		"threadId": strings.TrimSpace(threadID),
 	}
+	if trimmedModel := strings.TrimSpace(model); trimmedModel != "" {
+		params["model"] = trimmedModel
+	}
+	if trimmedReasoningEffort := strings.TrimSpace(reasoningEffort); trimmedReasoningEffort != "" {
+		params["effort"] = trimmedReasoningEffort
+	}
+	return params
+}
+
+func buildThreadSessionParamsBase(
+	cwd string,
+	cfg codexAppConfig,
+	sessionModel string,
+	sessionMCPServers map[string]acp.McpServer,
+) map[string]any {
+	params := map[string]any{}
 	if trimmedCWD := strings.TrimSpace(cwd); trimmedCWD != "" {
 		params["cwd"] = trimmedCWD
 	}

@@ -30,6 +30,7 @@ This document does not require backend source internals; it documents observable
 - Server-initiated requests: 9 methods
 - `ThreadItem` variants: 16 types
 - `ThreadStatus.activeFlags`: `waitingOnApproval`, `waitingOnUserInput`
+- ACP lifecycle support includes `session/new`, `session/load`, and `session/resume`.
 
 ## Required adapter invariants
 
@@ -50,6 +51,7 @@ The adapter should project Codex backend events into ACP session semantics as fo
 ### Initialize negotiation
 
 The bridge always sets `initialize.capabilities.experimentalApi=true`.
+The bridge advertises ACP `loadSession=true` and `sessionCapabilities.resume={}`.
 
 Notification opt-outs depend on bridge flags:
 - `--message-streaming=false` -> opt out `item/agentMessage/delta`
@@ -176,6 +178,10 @@ For request types without a native ACP equivalent, the adapter uses ACP `session
 
 ### Prompt/session state
 
+- Session creation/loading:
+  - `session/new` starts a fresh app-server thread and returns `thread.sessionId` as the ACP `sessionId`.
+  - `session/load` and `session/resume` resolve the requested ACP `sessionId` through `thread/list` and reattach with `thread/resume`.
+  - Current bridge behavior does not replay prior ACP history during `session/load`; both load and resume restore state only.
 - Prompt completion: `turn/completed`; `error` with `willRetry=false`.
 - Usage and metadata: `thread/tokenUsage/updated`, `account/rateLimits/updated`,
   `mcpServer/startupStatus/updated`.

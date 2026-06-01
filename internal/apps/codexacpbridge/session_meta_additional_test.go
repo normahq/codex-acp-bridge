@@ -48,14 +48,9 @@ func TestSessionConfigFromNewSessionMetaSessionIDValidation(t *testing.T) {
 		want string
 	}{
 		{
-			name: "session id wrong type",
+			name: "session id unsupported",
 			meta: map[string]any{"sessionId": 10},
-			want: "session/new _meta.sessionId must be a string",
-		},
-		{
-			name: "session id empty",
-			meta: map[string]any{"sessionId": "   "},
-			want: "session/new _meta.sessionId must not be empty",
+			want: "session/new _meta.sessionId is not supported",
 		},
 	}
 
@@ -75,14 +70,13 @@ func TestSessionConfigFromNewSessionMetaSessionIDValidation(t *testing.T) {
 
 func TestSessionConfigFromNewSessionMetaCodexObjectValidation(t *testing.T) {
 	sessionID, cfg, err := sessionConfigFromNewSessionMeta(map[string]any{
-		"sessionId": "s-1",
-		"codex":     nil,
+		"codex": nil,
 	}, codexAppConfig{Sandbox: "read-only"})
 	if err != nil {
 		t.Fatalf("sessionConfigFromNewSessionMeta(codex=nil) error = %v", err)
 	}
-	if sessionID != "s-1" {
-		t.Fatalf("sessionID = %q, want %q", sessionID, "s-1")
+	if sessionID != "" {
+		t.Fatalf("sessionID = %q, want empty", sessionID)
 	}
 	if cfg.Sandbox != "read-only" {
 		t.Fatalf("cfg.Sandbox = %q, want %q", cfg.Sandbox, "read-only")

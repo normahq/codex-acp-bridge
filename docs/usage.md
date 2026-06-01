@@ -84,6 +84,9 @@ acp-repl -- codex-acp-bridge
   - `--reasoning-thoughts=off` opts out all reasoning delta notifications.
 - Opens ACP agent-side stdio connection for clients.
 - Creates one backend session per ACP session.
+- `session/new` returns the app-server session tree id (`thread.sessionId`) as the ACP `sessionId`.
+- Supports ACP `session/load` and `session/resume` using app-server `thread/list` + `thread/resume`.
+  - `session/load` and `session/resume` currently restore session state only; they do not replay prior ACP message/thought/tool updates.
 - Reads per-session Codex defaults from `session/new.params._meta.codex` (strictly validated).
 - Supports ACP cancellation via `session/cancel`.
 - Optional agent message streaming:
@@ -105,11 +108,11 @@ acp-repl -- codex-acp-bridge
     - `session/new._meta.codex.mcp` includes `contract` and requested server descriptors.
     - `session/prompt._meta.codex.mcp.startupStatus` includes latest startup status/error for requested servers.
 - Supports `session/set_model` and `session/set_mode` for ACP session state.
-  - `session/set_model` updates model selection used by subsequent `turn/start` calls.
+  - `session/set_model` updates model selection used by subsequent `turn/start` calls and persists it to app-server thread settings when the thread already exists.
   - `session/set_mode` is stored in ACP session state only; current bridge implementation does not forward mode into backend `thread/start` or `turn/start` payload fields.
 - Supports ACP session configuration options for reasoning effort.
   - `session/new.configOptions` includes a `reasoning_effort` select option when app-server `model/list` advertises reasoning efforts for the current model.
-  - `session/set_config_option` with `configId=reasoning_effort` updates the effort used by subsequent `turn/start.effort` payloads.
+  - `session/set_config_option` with `configId=reasoning_effort` updates the effort used by subsequent `turn/start.effort` payloads and persists it to app-server thread settings when the thread already exists.
   - Supported values are model-advertised and may include values such as `minimal`, `low`, `medium`, `high`, or `xhigh`.
 - Populates ACP `session/new.models` from app-server `model/list` when available.
 - Model selection is ACP-native; prefer `session/set_model`.
@@ -138,6 +141,7 @@ Supported keys and mappings:
 
 Validation and precedence:
 
+- `session/new._meta.sessionId` is rejected; ACP session ids are backend-generated and durable.
 - Unknown `codex` keys are rejected with ACP `invalid_params`.
 - `profile` overrides `config.profile`.
 - `compactPrompt` overrides `config.compact_prompt`.
@@ -153,7 +157,6 @@ Example `session/new` request:
   "params": {
     "cwd": "/workspace",
     "_meta": {
-      "sessionId": "session-123",
       "codex": {
         "sandbox": "workspace-write",
         "approvalPolicy": "on-request",

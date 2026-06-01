@@ -46,12 +46,21 @@ type appServerInitializeResponse struct {
 	UserAgent string `json:"userAgent"`
 }
 
+type appServerThread struct {
+	ID        string `json:"id"`
+	SessionID string `json:"sessionId"`
+}
+
 type appServerThreadStartResponse struct {
-	Thread struct {
-		ID string `json:"id"`
-	} `json:"thread"`
-	Model           string  `json:"model,omitempty"`
-	ReasoningEffort *string `json:"reasoningEffort,omitempty"`
+	Thread          appServerThread `json:"thread"`
+	Model           string          `json:"model,omitempty"`
+	ReasoningEffort *string         `json:"reasoningEffort,omitempty"`
+}
+
+type appServerThreadResumeResponse struct {
+	Thread          appServerThread `json:"thread"`
+	Model           string          `json:"model,omitempty"`
+	ReasoningEffort *string         `json:"reasoningEffort,omitempty"`
 }
 
 type appServerTurnStartResponse struct {
@@ -77,6 +86,11 @@ type appServerReasoningEffortOption struct {
 type appServerModelListResponse struct {
 	Data       []appServerModel `json:"data"`
 	NextCursor *string          `json:"nextCursor,omitempty"`
+}
+
+type appServerThreadListResponse struct {
+	Data       []appServerThread `json:"data"`
+	NextCursor *string           `json:"nextCursor,omitempty"`
 }
 
 type appServerRPCResponse struct {
@@ -129,7 +143,10 @@ type appServerBackend struct {
 type appServerSession interface {
 	InitializeResponse() appServerInitializeResponse
 	Events() <-chan appServerEvent
+	ThreadList(ctx context.Context, params map[string]any) (appServerThreadListResponse, error)
 	ThreadStart(ctx context.Context, params map[string]any) (appServerThreadStartResponse, error)
+	ThreadResume(ctx context.Context, params map[string]any) (appServerThreadResumeResponse, error)
+	ThreadSettingsUpdate(ctx context.Context, params map[string]any) error
 	TurnStart(ctx context.Context, params map[string]any) (appServerTurnStartResponse, error)
 	ModelList(ctx context.Context, params map[string]any) (appServerModelListResponse, error)
 	TurnInterrupt(ctx context.Context, threadID string, turnID string) error
@@ -222,6 +239,14 @@ func (b *appServerBackend) Events() <-chan appServerEvent {
 	return b.events
 }
 
+func (b *appServerBackend) ThreadList(ctx context.Context, params map[string]any) (appServerThreadListResponse, error) {
+	var resp appServerThreadListResponse
+	if err := b.call(ctx, "thread/list", params, &resp); err != nil {
+		return appServerThreadListResponse{}, err
+	}
+	return resp, nil
+}
+
 func (b *appServerBackend) ThreadStart(ctx context.Context, params map[string]any) (appServerThreadStartResponse, error) {
 	var resp appServerThreadStartResponse
 	if err := b.call(ctx, "thread/start", params, &resp); err != nil {
@@ -230,7 +255,28 @@ func (b *appServerBackend) ThreadStart(ctx context.Context, params map[string]an
 	if strings.TrimSpace(resp.Thread.ID) == "" {
 		return appServerThreadStartResponse{}, errors.New("thread/start returned empty thread id")
 	}
+	if strings.TrimSpace(resp.Thread.SessionID) == "" {
+		return appServerThreadStartResponse{}, errors.New("thread/start returned empty thread session id")
+	}
 	return resp, nil
+}
+
+func (b *appServerBackend) ThreadResume(ctx context.Context, params map[string]any) (appServerThreadResumeResponse, error) {
+	var resp appServerThreadResumeResponse
+	if err := b.call(ctx, "thread/resume", params, &resp); err != nil {
+		return appServerThreadResumeResponse{}, err
+	}
+	if strings.TrimSpace(resp.Thread.ID) == "" {
+		return appServerThreadResumeResponse{}, errors.New("thread/resume returned empty thread id")
+	}
+	if strings.TrimSpace(resp.Thread.SessionID) == "" {
+		return appServerThreadResumeResponse{}, errors.New("thread/resume returned empty thread session id")
+	}
+	return resp, nil
+}
+
+func (b *appServerBackend) ThreadSettingsUpdate(ctx context.Context, params map[string]any) error {
+	return b.call(ctx, "thread/settings/update", params, nil)
 }
 
 func (b *appServerBackend) TurnStart(ctx context.Context, params map[string]any) (appServerTurnStartResponse, error) {

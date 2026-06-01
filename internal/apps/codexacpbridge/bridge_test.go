@@ -24,8 +24,20 @@ func (s *appServerSessionSpy) Events() <-chan appServerEvent {
 	return nil
 }
 
+func (s *appServerSessionSpy) ThreadList(context.Context, map[string]any) (appServerThreadListResponse, error) {
+	return appServerThreadListResponse{}, nil
+}
+
 func (s *appServerSessionSpy) ThreadStart(context.Context, map[string]any) (appServerThreadStartResponse, error) {
 	return appServerThreadStartResponse{}, nil
+}
+
+func (s *appServerSessionSpy) ThreadResume(context.Context, map[string]any) (appServerThreadResumeResponse, error) {
+	return appServerThreadResumeResponse{}, nil
+}
+
+func (s *appServerSessionSpy) ThreadSettingsUpdate(context.Context, map[string]any) error {
+	return nil
 }
 
 func (s *appServerSessionSpy) TurnStart(context.Context, map[string]any) (appServerTurnStartResponse, error) {

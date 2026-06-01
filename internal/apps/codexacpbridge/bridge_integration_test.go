@@ -33,8 +33,8 @@ func TestCodexACPIntegrationInitializeCapabilities(t *testing.T) {
 	}
 
 	caps := initResp.AgentCapabilities
-	if caps.LoadSession {
-		t.Fatalf("initialize loadSession = %t, want false", caps.LoadSession)
+	if !caps.LoadSession {
+		t.Fatalf("initialize loadSession = %t, want true", caps.LoadSession)
 	}
 	if !caps.McpCapabilities.Http {
 		t.Fatal("initialize mcpCapabilities.http = false, want true")
@@ -50,6 +50,9 @@ func TestCodexACPIntegrationInitializeCapabilities(t *testing.T) {
 	}
 	if caps.PromptCapabilities.EmbeddedContext {
 		t.Fatal("initialize promptCapabilities.embeddedContext = true, want false")
+	}
+	if caps.SessionCapabilities.Resume == nil {
+		t.Fatal("initialize sessionCapabilities.resume = nil, want non-nil")
 	}
 }
 
@@ -80,6 +83,25 @@ func TestCodexACPIntegrationNewSessionRejectsUnsupportedCodexMetaKey(t *testing.
 	})
 	if err == nil {
 		failWithDetails(t, "session/new unexpectedly succeeded with unsupported _meta.codex key", nil, stderr.String())
+	}
+	assertInvalidParamsError(t, err)
+}
+
+func TestCodexACPIntegrationNewSessionRejectsCustomSessionID(t *testing.T) {
+	workingDir := requireCodexEnvironment(t)
+	bin := buildCodexACPBinary(t, workingDir)
+
+	client, stderr := newCodexACPClient(t, workingDir, bin)
+	_ = mustInitialize(t, client, stderr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), integrationTestTimeout)
+	defer cancel()
+
+	_, err := client.NewSessionWithMeta(ctx, workingDir, nil, map[string]any{
+		"sessionId": "custom-session-id",
+	})
+	if err == nil {
+		failWithDetails(t, "session/new unexpectedly succeeded with custom _meta.sessionId", nil, stderr.String())
 	}
 	assertInvalidParamsError(t, err)
 }

@@ -58,3 +58,46 @@ func TestBuildTurnStartParamsRejectsUnsupportedResourceLink(t *testing.T) {
 		t.Fatalf("buildTurnStartParams() error = %v, want unsupported resource_link", err)
 	}
 }
+
+func TestBuildThreadResumeParamsIncludesThreadAndOverrides(t *testing.T) {
+	params := buildThreadResumeParams(
+		"thr-9",
+		"/tmp/work",
+		codexAppConfig{
+			ApprovalPolicy:    testApprovalOnRequest,
+			ApprovalsReviewer: testApprovalsReviewerGuard,
+			ModelProvider:     "openai",
+			Personality:       testPersonalityPragmatic,
+			Sandbox:           "workspace-write",
+			ServiceTier:       testServiceTierFlex,
+		},
+		testModelGPT54,
+		nil,
+	)
+
+	if got := stringValue(params, "threadId"); got != "thr-9" {
+		t.Fatalf("threadId = %q, want %q", got, "thr-9")
+	}
+	if got := stringValue(params, "cwd"); got != "/tmp/work" {
+		t.Fatalf("cwd = %q, want %q", got, "/tmp/work")
+	}
+	if got, ok := boolValue(params, "excludeTurns"); !ok || !got {
+		t.Fatalf("excludeTurns = %t (ok=%t), want true", got, ok)
+	}
+	if got := stringValue(params, "model"); got != testModelGPT54 {
+		t.Fatalf("model = %q, want %q", got, testModelGPT54)
+	}
+}
+
+func TestBuildThreadSettingsUpdateParams(t *testing.T) {
+	params := buildThreadSettingsUpdateParams("thr-9", testModelGPT54, testReasoningXHigh)
+	if got := stringValue(params, "threadId"); got != "thr-9" {
+		t.Fatalf("threadId = %q, want %q", got, "thr-9")
+	}
+	if got := stringValue(params, "model"); got != testModelGPT54 {
+		t.Fatalf("model = %q, want %q", got, testModelGPT54)
+	}
+	if got := stringValue(params, "effort"); got != testReasoningXHigh {
+		t.Fatalf("effort = %q, want %q", got, testReasoningXHigh)
+	}
+}
