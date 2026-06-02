@@ -316,8 +316,28 @@ func TestInitializeAdvertisesImagePromptCapability(t *testing.T) {
 	}
 }
 
+func TestLogoutReturnsEmptyResponse(t *testing.T) {
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return nil, errors.New("not used")
+	}, "agent", codexAppConfig{}, &l)
+
+	resp, err := agent.Logout(context.Background(), acp.LogoutRequest{})
+	if err != nil {
+		t.Fatalf("Logout() error = %v", err)
+	}
+	if len(resp.Meta) != 0 {
+		t.Fatalf("Logout() response = %#v, want zero value", resp)
+	}
+}
+
 func TestSessionModeIsStoredButNotForwardedToBackendPayloads(t *testing.T) {
 	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	session.modelListResponses = []appServerModelListResponse{
+		{Data: []appServerModel{{ID: testModelGPT54, DisplayName: "GPT-5.4", IsDefault: true}, {ID: "gpt-5.5", DisplayName: "GPT-5.5"}}},
+		{Data: []appServerModel{{ID: testModelGPT54, DisplayName: "GPT-5.4", IsDefault: true}, {ID: "gpt-5.5", DisplayName: "GPT-5.5"}}},
+		{Data: []appServerModel{{ID: testModelGPT54, DisplayName: "GPT-5.4", IsDefault: true}, {ID: "gpt-5.5", DisplayName: "GPT-5.5"}}},
+	}
 	queueNotification(session, "turn/completed", map[string]any{
 		"threadId": "thr-1",
 		"turnId":   "turn-1",
@@ -387,6 +407,67 @@ func TestSessionModeIsStoredButNotForwardedToBackendPayloads(t *testing.T) {
 	}
 	if _, ok := turnStartParams[0]["mode"]; ok {
 		t.Fatalf("turn/start params unexpectedly include mode: %#v", turnStartParams[0])
+	}
+}
+
+func TestSetSessionModelRejectsUnadvertisedModelAndKeepsPreviousModel(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	session.modelListResponses = []appServerModelListResponse{
+		{Data: []appServerModel{{ID: testModelGPT54, DisplayName: "GPT-5.4", IsDefault: true}}},
+		{Data: []appServerModel{{ID: testModelGPT54, DisplayName: "GPT-5.4", IsDefault: true}}},
+	}
+	queueNotification(session, "turn/completed", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "completed",
+		},
+	})
+
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+
+	_, err = agent.UnstableSetSessionModel(context.Background(), acp.UnstableSetSessionModelRequest{
+		SessionId: newResp.SessionId,
+		ModelId:   acp.UnstableModelId("gpt-5.3-codex"),
+	})
+	if err == nil {
+		t.Fatal("UnstableSetSessionModel() error = nil, want invalid params error")
+	}
+	reqErr := &acp.RequestError{}
+	if !errors.As(err, &reqErr) {
+		t.Fatalf("UnstableSetSessionModel() error type = %T, want *acp.RequestError", err)
+	}
+	if reqErr.Code != -32602 {
+		t.Fatalf("UnstableSetSessionModel() request error code = %d, want -32602", reqErr.Code)
+	}
+	if got := len(session.settingsUpdateParamsSnapshot()); got != 0 {
+		t.Fatalf("thread/settings/update calls = %d, want 0", got)
+	}
+
+	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	}); err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+
+	turnStartParams := session.turnStartParamsSnapshot()
+	if len(turnStartParams) != 1 {
+		t.Fatalf("turn/start calls = %d, want 1", len(turnStartParams))
+	}
+	if got := stringValue(turnStartParams[0], "model"); got != testModelGPT54 {
+		t.Fatalf("turn/start model = %q, want %q", got, testModelGPT54)
 	}
 }
 
@@ -663,7 +744,7 @@ func TestNewSessionIncludesReasoningEffortConfigOptionsFromModelList(t *testing.
 	if got := option.CurrentValue; got != acp.SessionConfigValueId(testReasoningXHigh) {
 		t.Fatalf("reasoning current value = %q, want xhigh", got)
 	}
-	if option.Category == nil || option.Category.Other == nil || *option.Category.Other != sessionConfigCategoryThoughtLevel {
+	if option.Category == nil || *option.Category != acp.SessionConfigOptionCategoryThoughtLevel {
 		t.Fatalf("reasoning category = %#v, want %q", option.Category, sessionConfigCategoryThoughtLevel)
 	}
 	if !reasoningEffortOptionsInclude(option, testReasoningXHigh) {
@@ -889,6 +970,37 @@ func TestNewSessionModelListPaginationAndThreadModelPrecedence(t *testing.T) {
 	}
 }
 
+func TestNewSessionNormalizesUnsupportedThreadModelToAdvertisedDefault(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	session.threadStartResp.Model = "gpt-5.3-codex"
+	session.modelListResponses = []appServerModelListResponse{
+		{
+			Data: []appServerModel{
+				{ID: testModelGPT54, DisplayName: "GPT-5.4", IsDefault: true},
+				{ID: "gpt-5.4-mini", DisplayName: "GPT-5.4 mini"},
+			},
+		},
+	}
+
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+	agent.setConnection(conn)
+
+	resp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	if resp.Models == nil {
+		t.Fatal("NewSession().Models = nil, want non-nil")
+	}
+	if got := resp.Models.CurrentModelId; got != acp.ModelId(testModelGPT54) {
+		t.Fatalf("current model = %q, want %q", got, testModelGPT54)
+	}
+}
+
 func TestNewSessionContinuesWhenModelListFails(t *testing.T) {
 	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
 	session.modelListErr = errors.New("boom")
@@ -936,7 +1048,7 @@ func TestHandleNotificationCommandExecOutputDeltaDoesNotEmitThought(t *testing.T
 	if err != nil {
 		t.Fatalf("marshal params: %v", err)
 	}
-	done, stopReason, usage, err := agent.handleNotification(context.Background(), sessionID, "thr-1", "turn-1", true, &appServerNotification{
+	done, stopReason, usage, errorMeta, err := agent.handleNotification(context.Background(), sessionID, "thr-1", "turn-1", true, &appServerNotification{
 		Method: "command/exec/outputDelta",
 		Params: raw,
 	})
@@ -951,6 +1063,9 @@ func TestHandleNotificationCommandExecOutputDeltaDoesNotEmitThought(t *testing.T
 	}
 	if usage != nil {
 		t.Fatalf("handleNotification() usage = %#v, want nil", usage)
+	}
+	if errorMeta != nil {
+		t.Fatalf("handleNotification() errorMeta = %#v, want nil", errorMeta)
 	}
 
 	updates := conn.sessionUpdates(sessionID)
@@ -1857,7 +1972,7 @@ func TestCompletedFinalAnswerDoesNotCompletePrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal params: %v", err)
 	}
-	done, stopReason, usage, err := agent.handleNotification(context.Background(), sessionID, "thr-1", "turn-1", true, &appServerNotification{
+	done, stopReason, usage, errorMeta, err := agent.handleNotification(context.Background(), sessionID, "thr-1", "turn-1", true, &appServerNotification{
 		Method: "item/completed",
 		Params: raw,
 	})
@@ -1872,6 +1987,9 @@ func TestCompletedFinalAnswerDoesNotCompletePrompt(t *testing.T) {
 	}
 	if usage != nil {
 		t.Fatalf("handleNotification() usage = %#v, want nil", usage)
+	}
+	if errorMeta != nil {
+		t.Fatalf("handleNotification() errorMeta = %#v, want nil", errorMeta)
 	}
 	if !containsAgentMessageText(conn.sessionUpdates(sessionID), "done") {
 		t.Fatalf("missing final answer agent message update: %#v", conn.sessionUpdates(sessionID))
@@ -2351,12 +2469,65 @@ func TestPromptStopsOnErrorNotificationWithoutRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prompt() error = %v", err)
 	}
-	if promptResp.StopReason != acp.StopReasonRefusal {
-		t.Fatalf("StopReason = %q, want %q", promptResp.StopReason, acp.StopReasonRefusal)
+	if promptResp.StopReason != acp.StopReasonEndTurn {
+		t.Fatalf("StopReason = %q, want %q", promptResp.StopReason, acp.StopReasonEndTurn)
+	}
+	errMeta := mapValue(promptResp.Meta, "error")
+	if got := stringValue(errMeta, "message"); got != "fatal boom" {
+		t.Fatalf("PromptResponse.Meta.error.message = %q, want %q", got, "fatal boom")
+	}
+	if got := stringValue(errMeta, "additionalDetails"); got != "stacktrace" {
+		t.Fatalf("PromptResponse.Meta.error.additionalDetails = %q, want %q", got, "stacktrace")
 	}
 	updates := conn.sessionUpdates(newResp.SessionId)
 	if countThoughtChunks(updates) != 0 {
 		t.Fatalf("unexpected thought updates after error notification: %#v", updates)
+	}
+}
+
+func TestPromptMetaIncludesTurnFailureErrorDetails(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	queueNotification(session, "turn/completed", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "failed",
+			"error": map[string]any{
+				"message":           "model not supported",
+				"codexErrorInfo":    "other",
+				"additionalDetails": "chatgpt account mismatch",
+			},
+		},
+	})
+
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	promptResp, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	})
+	if err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+	if promptResp.StopReason != acp.StopReasonEndTurn {
+		t.Fatalf("StopReason = %q, want %q", promptResp.StopReason, acp.StopReasonEndTurn)
+	}
+	errMeta := mapValue(promptResp.Meta, "error")
+	if got := stringValue(errMeta, "message"); got != "model not supported" {
+		t.Fatalf("PromptResponse.Meta.error.message = %q, want %q", got, "model not supported")
+	}
+	if got := stringValue(errMeta, "codexErrorInfo"); got != "other" {
+		t.Fatalf("PromptResponse.Meta.error.codexErrorInfo = %q, want %q", got, "other")
 	}
 }
 
@@ -3336,7 +3507,7 @@ func TestServerRequestResolvedClearsPendingRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal params: %v", err)
 	}
-	done, stopReason, usage, err := agent.handleNotification(context.Background(), sessionID, "thr-1", "turn-1", true, &appServerNotification{
+	done, stopReason, usage, errorMeta, err := agent.handleNotification(context.Background(), sessionID, "thr-1", "turn-1", true, &appServerNotification{
 		Method: "serverRequest/resolved",
 		Params: raw,
 	})
@@ -3351,6 +3522,9 @@ func TestServerRequestResolvedClearsPendingRequest(t *testing.T) {
 	}
 	if usage != nil {
 		t.Fatalf("handleNotification() usage = %#v, want nil", usage)
+	}
+	if errorMeta != nil {
+		t.Fatalf("handleNotification() errorMeta = %#v, want nil", errorMeta)
 	}
 	if got := len(agent.sessions[sessionID].pendingRequests); got != 0 {
 		t.Fatalf("pending requests = %d, want 0", got)
@@ -3945,7 +4119,7 @@ func TestStopReasonFromTurnStatus(t *testing.T) {
 	}{
 		{"completed", "completed", acp.StopReasonEndTurn},
 		{"interrupted", "interrupted", acp.StopReasonCancelled},
-		{"failed", "failed", acp.StopReasonRefusal},
+		{"failed", "failed", acp.StopReasonEndTurn},
 		{"empty", "", acp.StopReasonEndTurn},
 		{"unknown status", "unknown_status", acp.StopReasonEndTurn},
 		{"inProgress", "inProgress", acp.StopReasonEndTurn},

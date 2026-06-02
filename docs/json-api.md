@@ -81,7 +81,7 @@ Notification opt-outs depend on bridge flags:
 | `turn/plan/updated` | `threadId,turnId,plan` | plan snapshot update | Authoritative whole-plan snapshot. The bridge clears delta-derived preview state and emits the provided entries as the full ACP plan replacement, including an empty list when the snapshot is empty. |
 | `turn/diff/updated` | `threadId,turnId,diff` | no ACP streaming update | Diff is not emitted as thought/message/tool content. |
 | `thread/tokenUsage/updated` | `threadId,turnId,tokenUsage` | usage update | Forwards `tokenUsage.last.{inputTokens,outputTokens,totalTokens,cachedInputTokens}` into ACP meta usage (`cachedInputTokens` -> `cachedReadTokens`). |
-| `error` | `threadId,turnId,error,willRetry` | error event | If `willRetry=false`, finalize turn as failed/interrupted. |
+| `error` | `threadId,turnId,error,willRetry` | error event | If `willRetry=false`, finalize the prompt and preserve `error` in `session/prompt._meta.error`. |
 | `turn/completed` | `threadId,turn` | turn completed | Authoritative prompt terminal signal. Latest schema does not require a top-level `turnId`; if present, it must match the active turn. |
 | `serverRequest/resolved` | `threadId,requestId` | request lifecycle ack | Clear pending request state. |
 
@@ -99,10 +99,10 @@ Latest app-server schema requires `threadId` and `turn` for `turn/completed`; it
 ACP stop reason is derived from `turn.status`:
 - `completed` -> `end_turn`
 - `interrupted` -> `cancelled`
-- `failed` -> `refusal`
+- `failed` -> `end_turn`
 - missing, unknown, or `inProgress` -> `end_turn`
 
-`error` with `willRetry=false` is the exceptional terminal path and maps to `refusal`; retried errors do not complete the ACP prompt. Usage attached to `session/prompt` completion comes from token usage on the terminal event when present, otherwise from the latest `thread/tokenUsage/updated` notification observed for the session.
+`error` with `willRetry=false` is the exceptional terminal path and maps to `end_turn`; retried errors do not complete the ACP prompt. The bridge preserves provider/app-server failure details in `session/prompt._meta.error` using the raw terminal `error` payload when present, and for `turn/completed(status=failed)` it preserves `turn.error` in the same field. Usage attached to `session/prompt` completion comes from token usage on the terminal event when present, otherwise from the latest `thread/tokenUsage/updated` notification observed for the session.
 
 ### Command output distinction
 

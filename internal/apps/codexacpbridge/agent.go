@@ -80,6 +80,7 @@ type codexACPProxyAgent struct {
 
 type promptCompletion struct {
 	stopReason acp.StopReason
+	errorMeta  any
 	usage      map[string]any
 	err        error
 }
@@ -182,6 +183,10 @@ func (a *codexACPProxyAgent) setAgentVersion(version string) {
 
 func (a *codexACPProxyAgent) Authenticate(_ context.Context, _ acp.AuthenticateRequest) (acp.AuthenticateResponse, error) {
 	return acp.AuthenticateResponse{}, nil
+}
+
+func (a *codexACPProxyAgent) Logout(_ context.Context, _ acp.LogoutRequest) (acp.LogoutResponse, error) {
+	return acp.LogoutResponse{}, nil
 }
 
 func (a *codexACPProxyAgent) Initialize(_ context.Context, _ acp.InitializeRequest) (acp.InitializeResponse, error) {
@@ -628,6 +633,9 @@ func (a *codexACPProxyAgent) Prompt(ctx context.Context, params acp.PromptReques
 			}
 			resp := acp.PromptResponse{StopReason: completion.stopReason}
 			meta := map[string]any{}
+			if completion.errorMeta != nil {
+				meta["error"] = cloneJSONValue(completion.errorMeta)
+			}
 			usage := completion.usage
 			if usage == nil {
 				usage = a.sessionUsage(params.SessionId)
@@ -706,6 +714,9 @@ func (a *codexACPProxyAgent) UnstableSetSessionModel(
 		return acp.UnstableSetSessionModelResponse{}, err
 	}
 	nextModel := strings.TrimSpace(string(params.ModelId))
+	if nextModel == "" {
+		return acp.UnstableSetSessionModelResponse{}, acp.NewInvalidParams("session model is not supported")
+	}
 	a.mu.Lock()
 	if a.shuttingDown {
 		a.mu.Unlock()
@@ -723,12 +734,31 @@ func (a *codexACPProxyAgent) UnstableSetSessionModel(
 	backend := state.backend
 	threadID := state.threadID
 	previousModel := state.model
-	state.model = nextModel
 	a.mu.Unlock()
 
-	if err := persistSessionSettingsUpdate(ctx, backend, threadID, nextModel, ""); err != nil {
+	if backend == nil {
+		return acp.UnstableSetSessionModelResponse{}, errors.New(errSessionBackendUnavailable)
+	}
+
+	models, err := listAppServerModels(ctx, backend)
+	if err != nil {
+		return acp.UnstableSetSessionModelResponse{}, err
+	}
+	selectedModel, ok := findAppServerModel(models, nextModel)
+	if !ok {
+		return acp.UnstableSetSessionModelResponse{}, acp.NewInvalidParams("session model is not supported")
+	}
+	selectedModelID := strings.TrimSpace(selectedModel.ID)
+
+	a.mu.Lock()
+	if state := a.sessions[params.SessionId]; state != nil && state.done == nil {
+		state.model = selectedModelID
+	}
+	a.mu.Unlock()
+
+	if err := persistSessionSettingsUpdate(ctx, backend, threadID, selectedModelID, ""); err != nil {
 		a.mu.Lock()
-		if state := a.sessions[params.SessionId]; state != nil && state.done == nil && state.model == nextModel {
+		if state := a.sessions[params.SessionId]; state != nil && state.done == nil && state.model == selectedModelID {
 			state.model = previousModel
 		}
 		a.mu.Unlock()
@@ -922,16 +952,21 @@ func (a *codexACPProxyAgent) buildSessionModelConfigState(
 	}
 
 	var configOptions []acp.SessionConfigOption
-	selectedModel, hasSelectedModel := modelByID[currentModelID]
+	selectedModel, hasSelectedModel := selectAppServerModel(models, currentModelID)
 	if hasSelectedModel {
+		currentModelID = strings.TrimSpace(selectedModel.ID)
 		if option, selectedEffort, ok := reasoningEffortConfigOption(selectedModel, currentReasoningEffort, ""); ok {
 			configOptions = []acp.SessionConfigOption{option}
 			a.mu.Lock()
 			if state := a.sessions[sessionID]; state != nil {
-				if strings.TrimSpace(state.model) == "" {
-					state.model = currentModelID
-				}
+				state.model = currentModelID
 				state.reasoningEffort = selectedEffort
+			}
+			a.mu.Unlock()
+		} else {
+			a.mu.Lock()
+			if state := a.sessions[sessionID]; state != nil {
+				state.model = currentModelID
 			}
 			a.mu.Unlock()
 		}
@@ -1071,13 +1106,13 @@ func reasoningEffortConfigOption(
 	if selectedEffort == "" {
 		return acp.SessionConfigOption{}, "", false
 	}
-	category := acp.SessionConfigOptionCategoryOther(sessionConfigCategoryThoughtLevel)
+	category := acp.SessionConfigOptionCategoryThoughtLevel
 	return acp.SessionConfigOption{
 		Select: &acp.SessionConfigOptionSelect{
 			Type:         sessionConfigTypeSelect,
 			Id:           acp.SessionConfigId(sessionConfigIDReasoningEffort),
 			Name:         sessionConfigNameReasoningEffort,
-			Category:     &acp.SessionConfigOptionCategory{Other: &category},
+			Category:     &category,
 			CurrentValue: acp.SessionConfigValueId(selectedEffort),
 			Options:      acp.SessionConfigSelectOptions{Ungrouped: &options},
 		},
@@ -1178,7 +1213,7 @@ func (a *codexACPProxyAgent) runSessionEventLoop(ctx context.Context, sessionID 
 			}
 
 			threadID, turnID, hasActivePrompt := a.currentSessionCorrelation(sessionID)
-			done, stopReason, usage, err := a.handleNotification(ctx, sessionID, threadID, turnID, hasActivePrompt, event.Notification)
+			done, stopReason, usage, errorMeta, err := a.handleNotification(ctx, sessionID, threadID, turnID, hasActivePrompt, event.Notification)
 			if err != nil {
 				a.completePrompt(sessionID, promptCompletion{err: err})
 				continue
@@ -1189,6 +1224,7 @@ func (a *codexACPProxyAgent) runSessionEventLoop(ctx context.Context, sessionID 
 			if done {
 				a.completePrompt(sessionID, promptCompletion{
 					stopReason: stopReason,
+					errorMeta:  errorMeta,
 					usage:      usage,
 				})
 			}
@@ -1284,17 +1320,17 @@ func (a *codexACPProxyAgent) handleNotification(
 	turnID string,
 	hasActivePrompt bool,
 	note *appServerNotification,
-) (done bool, stopReason acp.StopReason, usage map[string]any, err error) {
+) (done bool, stopReason acp.StopReason, usage map[string]any, errorMeta any, err error) {
 	params, err := decodeJSONMap(note.Params)
 	if err != nil {
-		return false, "", nil, nil
+		return false, "", nil, nil, nil
 	}
 	if !matchesThreadID(params, threadID) {
-		return false, "", nil, nil
+		return false, "", nil, nil, nil
 	}
 	if requiresActiveTurn(note.Method) {
 		if !hasActivePrompt {
-			return false, "", nil, nil
+			return false, "", nil, nil, nil
 		}
 		if strings.TrimSpace(turnID) == "" && note.Method != methodTurnStarted {
 			if nextTurnID := strings.TrimSpace(stringValue(params, "turnId")); nextTurnID != "" {
@@ -1303,14 +1339,14 @@ func (a *codexACPProxyAgent) handleNotification(
 			}
 		}
 		if strings.TrimSpace(turnID) == "" {
-			return false, "", nil, nil
+			return false, "", nil, nil, nil
 		}
 		if note.Method != methodTurnStarted && !matchesTurnID(params, turnID) {
-			return false, "", nil, nil
+			return false, "", nil, nil, nil
 		}
 	}
 	if note.Method == methodTurnStarted && !hasActivePrompt {
-		return false, "", nil, nil
+		return false, "", nil, nil, nil
 	}
 
 	switch note.Method {
@@ -1323,7 +1359,7 @@ func (a *codexACPProxyAgent) handleNotification(
 	case "error":
 		willRetry, ok := boolValue(params, "willRetry")
 		if ok && !willRetry {
-			return true, acp.StopReasonRefusal, usageFromTokenNotification(params), nil
+			return true, acp.StopReasonEndTurn, usageFromTokenNotification(params), params["error"], nil
 		}
 	case "thread/status/changed":
 	case "turn/diff/updated":
@@ -1336,69 +1372,69 @@ func (a *codexACPProxyAgent) handleNotification(
 		a.resetTurnState(sessionID)
 	case methodAgentMessageDelta:
 		if !a.messageStreaming {
-			return false, "", nil, nil
+			return false, "", nil, nil, nil
 		}
 		itemID := stringValue(params, "itemId")
 		delta := rawStringValue(params, "delta")
 		if itemID == "" || delta == "" {
-			return false, "", nil, nil
+			return false, "", nil, nil, nil
 		}
 		if err := a.sendAgentMessageDelta(ctx, sessionID, itemID, delta); err != nil {
-			return false, "", nil, err
+			return false, "", nil, nil, err
 		}
 	case methodReasoningTextDelta, methodReasoningSummaryTextDelta:
 		if !a.reasoningStreaming || !a.reasoningThoughtsEnabled() {
-			return false, "", nil, nil
+			return false, "", nil, nil, nil
 		}
 		if err := a.handleReasoningDelta(ctx, sessionID, note.Method, params); err != nil {
-			return false, "", nil, err
+			return false, "", nil, nil, err
 		}
 	case methodReasoningSummaryPartAdded:
 		if !a.reasoningStreaming || !a.reasoningThoughtsIncludeSummary() {
-			return false, "", nil, nil
+			return false, "", nil, nil, nil
 		}
 		if err := a.handleReasoningSummaryPartAdded(ctx, sessionID, params); err != nil {
-			return false, "", nil, err
+			return false, "", nil, nil, err
 		}
 	case "item/plan/delta":
 		itemID := stringValue(params, "itemId")
 		delta := rawStringValue(params, "delta")
 		if itemID == "" || delta == "" {
-			return false, "", nil, nil
+			return false, "", nil, nil, nil
 		}
 		entries := a.appendPlanDelta(sessionID, itemID, delta)
 		if len(entries) == 0 {
-			return false, "", nil, nil
+			return false, "", nil, nil, nil
 		}
 		if err := a.sendUpdate(ctx, sessionID, acp.UpdatePlan(entries...)); err != nil {
-			return false, "", nil, err
+			return false, "", nil, nil, err
 		}
 	case "turn/plan/updated":
 		entries := planEntriesFromNotification(params)
 		a.resetPlanPreviewState(sessionID)
 		if err := a.sendUpdate(ctx, sessionID, acp.UpdatePlan(entries...)); err != nil {
-			return false, "", nil, err
+			return false, "", nil, nil, err
 		}
 	case methodItemStarted:
 		item := mapValue(params, "item")
 		if len(item) == 0 {
-			return false, "", nil, nil
+			return false, "", nil, nil, nil
 		}
 		itemType := stringValue(item, "type")
 		itemID := stringValue(item, "id")
 		if itemType == "" || itemID == "" {
-			return false, "", nil, nil
+			return false, "", nil, nil, nil
 		}
 		if itemType == "agentMessage" {
 			a.noteAgentMessageStarted(sessionID, item)
-			return false, "", nil, nil
+			return false, "", nil, nil, nil
 		}
 		if itemType == "reasoning" {
 			a.noteReasoningStarted(sessionID, item)
-			return false, "", nil, nil
+			return false, "", nil, nil, nil
 		}
 		if !isToolLifecycleItemType(itemType) {
-			return false, "", nil, nil
+			return false, "", nil, nil, nil
 		}
 		title := toolCallTitle(itemType, item)
 		update := acp.StartToolCall(
@@ -1409,38 +1445,38 @@ func (a *codexACPProxyAgent) handleNotification(
 			acp.WithStartRawInput(item),
 		)
 		if err := a.sendUpdate(ctx, sessionID, update); err != nil {
-			return false, "", nil, err
+			return false, "", nil, nil, err
 		}
 	case methodItemCompleted:
 		item := mapValue(params, "item")
 		if len(item) == 0 {
-			return false, "", nil, nil
+			return false, "", nil, nil, nil
 		}
 		itemType := stringValue(item, "type")
 		if itemType == "agentMessage" {
 			if err := a.handleCompletedAgentMessage(ctx, sessionID, item); err != nil {
-				return false, "", nil, err
+				return false, "", nil, nil, err
 			}
-			return false, "", nil, nil
+			return false, "", nil, nil, nil
 		}
 		if itemType == "reasoning" {
 			if err := a.handleCompletedReasoning(ctx, sessionID, item); err != nil {
-				return false, "", nil, err
+				return false, "", nil, nil, err
 			}
-			return false, "", nil, nil
+			return false, "", nil, nil, nil
 		}
 		if itemType == "plan" {
 			if err := a.handleCompletedPlan(ctx, sessionID, item); err != nil {
-				return false, "", nil, err
+				return false, "", nil, nil, err
 			}
-			return false, "", nil, nil
+			return false, "", nil, nil, nil
 		}
 		if !isToolLifecycleItemType(itemType) {
-			return false, "", nil, nil
+			return false, "", nil, nil, nil
 		}
 		itemID := stringValue(item, "id")
 		if itemID == "" {
-			return false, "", nil, nil
+			return false, "", nil, nil, nil
 		}
 		status := toACPToolCallStatus(stringValue(item, "status"))
 		update := acp.UpdateToolCall(
@@ -1449,13 +1485,13 @@ func (a *codexACPProxyAgent) handleNotification(
 			acp.WithUpdateRawOutput(item),
 		)
 		if err := a.sendUpdate(ctx, sessionID, update); err != nil {
-			return false, "", nil, err
+			return false, "", nil, nil, err
 		}
 	case "item/commandExecution/outputDelta", "item/fileChange/outputDelta":
 		itemID := stringValue(params, "itemId")
 		delta := rawStringValue(params, "delta")
 		if itemID == "" || delta == "" {
-			return false, "", nil, nil
+			return false, "", nil, nil, nil
 		}
 		update := acp.UpdateToolCall(
 			toolCallID(itemID),
@@ -1463,13 +1499,13 @@ func (a *codexACPProxyAgent) handleNotification(
 			acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock(delta))}),
 		)
 		if err := a.sendUpdate(ctx, sessionID, update); err != nil {
-			return false, "", nil, err
+			return false, "", nil, nil, err
 		}
 	case "item/fileChange/patchUpdated":
 		itemID := stringValue(params, "itemId")
 		patchText := fileChangePatchUpdatedText(params)
 		if itemID == "" || patchText == "" {
-			return false, "", nil, nil
+			return false, "", nil, nil, nil
 		}
 		update := acp.UpdateToolCall(
 			toolCallID(itemID),
@@ -1478,13 +1514,13 @@ func (a *codexACPProxyAgent) handleNotification(
 			acp.WithUpdateRawOutput(params),
 		)
 		if err := a.sendUpdate(ctx, sessionID, update); err != nil {
-			return false, "", nil, err
+			return false, "", nil, nil, err
 		}
 	case "item/commandExecution/terminalInteraction":
 		itemID := stringValue(params, "itemId")
 		stdin := rawStringValue(params, "stdin")
 		if itemID == "" || stdin == "" {
-			return false, "", nil, nil
+			return false, "", nil, nil, nil
 		}
 		update := acp.UpdateToolCall(
 			toolCallID(itemID),
@@ -1492,12 +1528,12 @@ func (a *codexACPProxyAgent) handleNotification(
 			acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock(stdin))}),
 		)
 		if err := a.sendUpdate(ctx, sessionID, update); err != nil {
-			return false, "", nil, err
+			return false, "", nil, nil, err
 		}
 	case "item/autoApprovalReview/started":
 		targetItemID := stringValue(params, "targetItemId")
 		if targetItemID == "" {
-			return false, "", nil, nil
+			return false, "", nil, nil, nil
 		}
 		review := mapValue(params, "review")
 		title := "auto approval review"
@@ -1512,7 +1548,7 @@ func (a *codexACPProxyAgent) handleNotification(
 			acp.WithStartRawInput(params),
 		)
 		if err := a.sendUpdate(ctx, sessionID, start); err != nil {
-			return false, "", nil, err
+			return false, "", nil, nil, err
 		}
 		if summary := guardianReviewSummary(review); summary != "" {
 			update := acp.UpdateToolCall(
@@ -1521,13 +1557,13 @@ func (a *codexACPProxyAgent) handleNotification(
 				acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock(summary))}),
 			)
 			if err := a.sendUpdate(ctx, sessionID, update); err != nil {
-				return false, "", nil, err
+				return false, "", nil, nil, err
 			}
 		}
 	case "item/autoApprovalReview/completed":
 		targetItemID := stringValue(params, "targetItemId")
 		if targetItemID == "" {
-			return false, "", nil, nil
+			return false, "", nil, nil, nil
 		}
 		review := mapValue(params, "review")
 		update := acp.UpdateToolCall(
@@ -1544,13 +1580,13 @@ func (a *codexACPProxyAgent) handleNotification(
 			)
 		}
 		if err := a.sendUpdate(ctx, sessionID, update); err != nil {
-			return false, "", nil, err
+			return false, "", nil, nil, err
 		}
 	case "hook/started":
 		run := mapValue(params, "run")
 		runID := stringValue(run, "id")
 		if runID == "" {
-			return false, "", nil, nil
+			return false, "", nil, nil, nil
 		}
 		start := acp.StartToolCall(
 			hookToolCallID(runID),
@@ -1560,13 +1596,13 @@ func (a *codexACPProxyAgent) handleNotification(
 			acp.WithStartRawInput(run),
 		)
 		if err := a.sendUpdate(ctx, sessionID, start); err != nil {
-			return false, "", nil, err
+			return false, "", nil, nil, err
 		}
 	case "hook/completed":
 		run := mapValue(params, "run")
 		runID := stringValue(run, "id")
 		if runID == "" {
-			return false, "", nil, nil
+			return false, "", nil, nil, nil
 		}
 		update := acp.UpdateToolCall(
 			hookToolCallID(runID),
@@ -1582,13 +1618,13 @@ func (a *codexACPProxyAgent) handleNotification(
 			)
 		}
 		if err := a.sendUpdate(ctx, sessionID, update); err != nil {
-			return false, "", nil, err
+			return false, "", nil, nil, err
 		}
 	case "item/mcpToolCall/progress":
 		itemID := stringValue(params, "itemId")
 		message := rawStringValue(params, "message")
 		if itemID == "" || message == "" {
-			return false, "", nil, nil
+			return false, "", nil, nil, nil
 		}
 		update := acp.UpdateToolCall(
 			toolCallID(itemID),
@@ -1596,7 +1632,7 @@ func (a *codexACPProxyAgent) handleNotification(
 			acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock(message))}),
 		)
 		if err := a.sendUpdate(ctx, sessionID, update); err != nil {
-			return false, "", nil, err
+			return false, "", nil, nil, err
 		}
 	case "serverRequest/resolved":
 		requestID, ok := requestIDFromAny(params["requestId"])
@@ -1653,9 +1689,9 @@ func (a *codexACPProxyAgent) handleNotification(
 		}
 		turn := mapValue(params, "turn")
 		status := stringValue(turn, "status")
-		return true, stopReasonFromTurnStatus(status), usageFromTokenNotification(params), nil
+		return true, stopReasonFromTurnStatus(status), usageFromTokenNotification(params), turnErrorMeta(turn, status), nil
 	}
-	return false, "", usage, nil
+	return false, "", usage, nil, nil
 }
 
 func (a *codexACPProxyAgent) handleServerRequest(ctx context.Context, sessionID acp.SessionId, req *appServerRequest) error {
@@ -2308,11 +2344,29 @@ func stopReasonFromTurnStatus(status string) acp.StopReason {
 	switch strings.TrimSpace(status) {
 	case "interrupted":
 		return acp.StopReasonCancelled
-	case "failed":
-		return acp.StopReasonRefusal
 	default:
 		return acp.StopReasonEndTurn
 	}
+}
+
+func turnErrorMeta(turn map[string]any, status string) any {
+	if strings.TrimSpace(status) != statusFailed || len(turn) == 0 {
+		return nil
+	}
+	return turn["error"]
+}
+
+func findAppServerModel(models []appServerModel, modelID string) (appServerModel, bool) {
+	trimmedModelID := strings.TrimSpace(modelID)
+	if trimmedModelID == "" {
+		return appServerModel{}, false
+	}
+	for _, model := range models {
+		if strings.TrimSpace(model.ID) == trimmedModelID {
+			return model, true
+		}
+	}
+	return appServerModel{}, false
 }
 
 func toolCallID(itemID string) acp.ToolCallId {
@@ -3066,6 +3120,25 @@ func cloneAnyMap(m map[string]any) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+func cloneJSONValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, entry := range typed {
+			out[key] = cloneJSONValue(entry)
+		}
+		return out
+	case []any:
+		out := make([]any, len(typed))
+		for idx, entry := range typed {
+			out[idx] = cloneJSONValue(entry)
+		}
+		return out
+	default:
+		return typed
+	}
 }
 
 func (a *codexACPProxyAgent) clearSessionBackend(sessionID acp.SessionId, backend appServerSession) {

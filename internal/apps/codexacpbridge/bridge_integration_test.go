@@ -143,7 +143,7 @@ func TestCodexACPIntegrationSetModelUnknownModelPolicy(t *testing.T) {
 
 	err := client.SetSessionModel(ctx, string(sessionResp.SessionId), invalidModel)
 	if err == nil {
-		t.Skip("session/set_model accepted unknown model id in this codex runtime; rejection policy is not enforced")
+		failWithDetails(t, "session/set_model unexpectedly accepted unknown model id", nil, stderr.String())
 	}
 	assertInvalidParamsError(t, err)
 }
