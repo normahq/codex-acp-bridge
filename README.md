@@ -6,31 +6,30 @@
 [![coverage](https://codecov.io/gh/normahq/codex-acp-bridge/branch/main/graph/badge.svg)](https://codecov.io/gh/normahq/codex-acp-bridge)
 [![npm version](https://img.shields.io/npm/v/%40normahq%2Fcodex-acp-bridge)](https://www.npmjs.com/package/@normahq/codex-acp-bridge)
 
-**Turn Codex into a full-scale ACP server.**
+Run Codex as an ACP agent.
 
-Zero deps. No OpenAI API keys. Uses your existing Codex subscription.
+`codex-acp-bridge` starts the local `codex app-server` backend and exposes it to Agent Client Protocol (ACP) clients over stdio. Use it when an ACP runner needs to talk to Codex through a stable command while keeping Codex authentication, session state, model selection, and tool behavior native to the Codex CLI.
 
-`codex-acp-bridge` exposes `codex app-server` as ACP over stdio, so ACP clients can run Codex with native session and model flows.
+It is not an OpenAI API proxy. It uses the authenticated Codex session on the machine where the bridge runs, so no OpenAI API key is required.
 
 ## Requirements
 
-- `codex` CLI in `PATH`.
-- Authenticated Codex session on the machine running the bridge.
+- `codex` CLI installed and available in `PATH`.
+- Authenticated Codex session on the host running the bridge.
 - Active Codex subscription.
 
-## 60-Second Quickstart
+## Quickstart
 
-Run the bridge:
+Run the bridge with `npx`:
 
 ```bash
 npx -y @normahq/codex-acp-bridge@latest
 ```
 
-Inspect ACP initialize/session payloads:
+Inspect the ACP handshake:
 
 ```bash
 npx -y @normahq/acp-dump -- npx -y @normahq/codex-acp-bridge@latest
-npx -y @normahq/acp-dump --json -- npx -y @normahq/codex-acp-bridge@latest
 ```
 
 Start an interactive ACP session:
@@ -41,45 +40,48 @@ npx -y @normahq/acp-repl -- npx -y @normahq/codex-acp-bridge@latest
 
 ## Installation
 
-Global install (npm):
+Install globally if your ACP client expects a stable executable name:
 
 ```bash
 npm install -g @normahq/codex-acp-bridge@latest
 ```
 
-One-off run with npx:
-
-```bash
-npx -y @normahq/codex-acp-bridge@latest
-```
-
-## GitHub
-
-- Repository: https://github.com/normahq/codex-acp-bridge
-- Issues: https://github.com/normahq/codex-acp-bridge/issues
-- Releases: https://github.com/normahq/codex-acp-bridge/releases
-- Test workflow: https://github.com/normahq/codex-acp-bridge/actions/workflows/test.yml
-- Lint workflow: https://github.com/normahq/codex-acp-bridge/actions/workflows/lint.yml
-
-## What "full-scale ACP server" means
-
-- Exposes Codex app-server as ACP over stdio.
-- Supports ACP `session/resume` via app-server thread resume.
-- Uses app-server `thread.id` as the ACP `sessionId` for direct resume mapping.
-- Populates ACP `session/new.models` from `model/list`.
-- Supports ACP `session/set_model` and `session/set_mode`.
-- Supports ACP `session/new.configOptions` and `session/set_config_option` for model-advertised reasoning effort values.
-- Supports text and image prompt blocks.
-- Supports per-session MCP servers from ACP `mcpServers` (`stdio`, `http`; rejects `sse`) using merge contract (same-name overrides, other configured servers remain active).
-- Supports strict session metadata mapping via `session/new._meta.codex`.
-- Returns backend-native durable ACP session IDs from `session/new`.
-
-## Usage
-
-Run the bridge:
+Then run:
 
 ```bash
 codex-acp-bridge
+```
+
+## What The Bridge Provides
+
+- ACP `initialize`, `session/new`, `session/prompt`, `session/cancel`, and `session/resume` backed by Codex app-server threads.
+- Durable ACP session IDs mapped directly to Codex app-server `thread.id` values.
+- ACP-native model handling through `session/new.models` and `session/set_model`.
+- ACP session configuration for model-advertised reasoning effort values.
+- Text and image prompt blocks.
+- Optional streaming for Codex agent messages and reasoning thoughts.
+- Per-session MCP server configuration from ACP `mcpServers`.
+- Strict `session/new._meta.codex` validation for Codex-specific startup options.
+
+For protocol-level details, see [docs/usage.md](https://github.com/normahq/codex-acp-bridge/blob/main/docs/usage.md) and [docs/json-api.md](https://github.com/normahq/codex-acp-bridge/blob/main/docs/json-api.md).
+
+## Runtime Options
+
+```bash
+codex-acp-bridge [flags]
+```
+
+Common flags:
+
+- `--name`: ACP agent name reported in `initialize.agentInfo.name`. Default: `norma-codex-acp-bridge`.
+- `--message-streaming`: stream Codex `agentMessage` deltas as ACP `agent_message_chunk` updates. Default: `false`.
+- `--reasoning-streaming`: stream Codex reasoning deltas live. Default: `true`.
+- `--reasoning-thoughts`: reasoning lane projected as ACP thoughts: `off`, `summary`, `content`, or `both`. Default: `summary`.
+- `--debug`: enable debug logging.
+
+Examples:
+
+```bash
 codex-acp-bridge --name team-codex
 codex-acp-bridge --message-streaming
 codex-acp-bridge --reasoning-thoughts=both
@@ -87,26 +89,32 @@ codex-acp-bridge --reasoning-streaming=false
 codex-acp-bridge --debug
 ```
 
-Flags:
+## Codex Session Metadata
 
-- `--name`: ACP agent name exposed via `initialize.agentInfo.name`.
-  Default: `norma-codex-acp-bridge`.
-- `--message-streaming`: Stream app-server `agentMessage` deltas as ACP `agent_message_chunk` updates.
-  Default: `false`.
-- `--reasoning-streaming`: Stream app-server reasoning deltas live when enabled; when disabled, emit final thought chunks from completed reasoning items only.
-  Default: `true`.
-- `--reasoning-thoughts`: Reasoning lane to project as ACP thoughts: `off`, `summary`, `content`, or `both`.
-  Default: `summary`.
-- `--debug`: Enable debug logging.
+Codex-specific session startup options belong under ACP `session/new.params._meta.codex`.
 
-If tools are installed globally:
+Supported keys include:
 
-```bash
-acp-dump -- codex-acp-bridge
-acp-repl -- codex-acp-bridge
-```
+- `sandbox`
+- `approvalPolicy`
+- `approvalsReviewer`
+- `baseInstructions`
+- `developerInstructions`
+- `modelProvider`
+- `personality`
+- `serviceTier`
+- `ephemeral`
+- `profile`
+- `compactPrompt`
+- `config`
 
-Documentation:
+Unknown keys are rejected with ACP `invalid_params`. ACP session IDs are generated by the backend; `session/new._meta.sessionId` is rejected.
 
-- [Usage](https://github.com/normahq/codex-acp-bridge/blob/main/docs/usage.md)
-- [JSON API](https://github.com/normahq/codex-acp-bridge/blob/main/docs/json-api.md)
+Use ACP `session/set_model` for model changes instead of bridge-specific model flags. Use ACP `mcpServers` for per-session MCP servers; supported transports are `stdio` and `http`, while `sse` is rejected.
+
+## Links
+
+- Repository: https://github.com/normahq/codex-acp-bridge
+- Issues: https://github.com/normahq/codex-acp-bridge/issues
+- Releases: https://github.com/normahq/codex-acp-bridge/releases
+- npm package: https://www.npmjs.com/package/@normahq/codex-acp-bridge
