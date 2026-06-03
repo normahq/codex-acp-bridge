@@ -101,3 +101,37 @@ func TestBuildThreadSettingsUpdateParams(t *testing.T) {
 		t.Fatalf("effort = %q, want %q", got, testReasoningXHigh)
 	}
 }
+
+func TestBuildThreadListParams(t *testing.T) {
+	cursor := " cursor-1 "
+	cwd := " /tmp/work "
+	params := buildThreadListParams(&cursor, &cwd)
+
+	if got := stringValue(params, "cursor"); got != "cursor-1" {
+		t.Fatalf("cursor = %q, want %q", got, "cursor-1")
+	}
+	if got := stringValue(params, "cwd"); got != "/tmp/work" {
+		t.Fatalf("cwd = %q, want %q", got, "/tmp/work")
+	}
+	if got, ok := boolValue(params, "archived"); !ok || got {
+		t.Fatalf("archived = %t (ok=%t), want false", got, ok)
+	}
+	if got := stringValue(params, "sortKey"); got != "updated_at" {
+		t.Fatalf("sortKey = %q, want updated_at", got)
+	}
+	if got := stringValue(params, "sortDirection"); got != "desc" {
+		t.Fatalf("sortDirection = %q, want desc", got)
+	}
+	sourceKinds, ok := params["sourceKinds"].([]string)
+	if !ok {
+		t.Fatalf("sourceKinds type = %T, want []string", params["sourceKinds"])
+	}
+	if len(sourceKinds) != len(appServerThreadListSourceKinds) {
+		t.Fatalf("sourceKinds len = %d, want %d", len(sourceKinds), len(appServerThreadListSourceKinds))
+	}
+	for idx, want := range appServerThreadListSourceKinds {
+		if got := sourceKinds[idx]; got != want {
+			t.Fatalf("sourceKinds[%d] = %q, want %q", idx, got, want)
+		}
+	}
+}

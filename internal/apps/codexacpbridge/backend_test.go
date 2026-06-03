@@ -547,6 +547,56 @@ func TestTurnInterrupt(t *testing.T) {
 	})
 }
 
+func TestThreadUnsubscribe(t *testing.T) {
+	t.Run("empty thread id is no-op", func(t *testing.T) {
+		writer := &captureWriteCloser{}
+		backend := newTestBackend(writer)
+		resp, err := backend.ThreadUnsubscribe(context.Background(), " ")
+		if err != nil {
+			t.Fatalf("ThreadUnsubscribe() error = %v", err)
+		}
+		if resp.Status != "" {
+			t.Fatalf("ThreadUnsubscribe() status = %q, want empty", resp.Status)
+		}
+		if got := len(writer.writesSnapshot()); got != 0 {
+			t.Fatalf("writes = %d, want 0", got)
+		}
+	})
+
+	t.Run("sends request when thread id present", func(t *testing.T) {
+		writer := &captureWriteCloser{}
+		backend := newTestBackend(writer)
+		errCh := make(chan error, 1)
+		var resp appServerThreadUnsubscribeResponse
+		go func() {
+			var err error
+			resp, err = backend.ThreadUnsubscribe(context.Background(), "thr-1")
+			errCh <- err
+		}()
+		waitForPendingRequest(t, backend, "1")
+		if err := backend.handleIncomingLine([]byte(`{"id":1,"result":{"status":"unsubscribed"}}` + "\n")); err != nil {
+			t.Fatalf("handleIncomingLine() error = %v", err)
+		}
+		if err := <-errCh; err != nil {
+			t.Fatalf("ThreadUnsubscribe() error = %v", err)
+		}
+		if got, want := resp.Status, "unsubscribed"; got != want {
+			t.Fatalf("ThreadUnsubscribe() status = %q, want %q", got, want)
+		}
+		payload := parseFirstWriteAsJSONMap(t, writer)
+		if got, want := payload["method"], "thread/unsubscribe"; got != want {
+			t.Fatalf("method = %#v, want %q", got, want)
+		}
+		params, ok := payload["params"].(map[string]any)
+		if !ok {
+			t.Fatalf("params type = %T, want map[string]any", payload["params"])
+		}
+		if got, want := params["threadId"], "thr-1"; got != want {
+			t.Fatalf("threadId = %#v, want %q", got, want)
+		}
+	})
+}
+
 func TestRespondRequestAndErrorValidation(t *testing.T) {
 	backend := newTestBackend(&captureWriteCloser{})
 	if err := backend.RespondRequest(context.Background(), nil, nil); err == nil || err.Error() != errRequestIDRequired {

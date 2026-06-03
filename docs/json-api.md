@@ -30,7 +30,7 @@ This document does not require backend source internals; it documents observable
 - Server-initiated requests: 9 methods
 - `ThreadItem` variants: 16 types
 - `ThreadStatus.activeFlags`: `waitingOnApproval`, `waitingOnUserInput`
-- ACP lifecycle support includes `session/new` and `session/resume`.
+- ACP lifecycle support includes `session/new`, `session/list`, `session/close`, and `session/resume`.
 
 ## Required adapter invariants
 
@@ -46,12 +46,12 @@ This document does not require backend source internals; it documents observable
 
 The adapter should project Codex backend events into ACP session semantics as follows.
 
-`session/update.agent_thought_chunk` is reserved for reasoning output only. The bridge can project the readable `summary` lane, the raw `content` lane, or both, and preserves that distinction in `_meta`. When `--reasoning-streaming=true`, selected lanes stream from reasoning delta notifications; when `--reasoning-streaming=false`, selected lanes are emitted from completed reasoning items only. `--reasoning-thoughts=off` disables thought output entirely.
+`session/update.agent_thought_chunk` is reserved for reasoning output only. The bridge can project the readable `summary` lane, the raw `content` lane, or both, and preserves that distinction in `_meta`. When `--reasoning-streaming=true`, selected lanes stream from reasoning delta notifications. When `--reasoning-streaming=false`, reasoning produces no ACP thought output. `--reasoning-thoughts=off` also disables thought output entirely.
 
 ### Initialize negotiation
 
 The bridge always sets `initialize.capabilities.experimentalApi=true`.
-The bridge advertises ACP `sessionCapabilities.resume={}`.
+The bridge advertises ACP `sessionCapabilities.list={}`, `sessionCapabilities.close={}`, and `sessionCapabilities.resume={}`.
 
 Notification opt-outs depend on bridge flags:
 - `--message-streaming=false` -> opt out `item/agentMessage/delta`
@@ -77,7 +77,7 @@ Notification opt-outs depend on bridge flags:
 | `item/fileChange/outputDelta` | `threadId,turnId,itemId,delta` | `session/update.tool_call_update` | Streaming patch preview/update. |
 | `item/fileChange/patchUpdated` | `threadId,turnId,itemId,changes` | `session/update.tool_call_update` | Joins `changes[].diff` as tool content and preserves raw output. |
 | `item/mcpToolCall/progress` | `threadId,turnId,itemId,message` | `session/update.tool_call_update` | Progress text. |
-| `item/completed` | `threadId,turnId,item` | item lifecycle completed | Finalizes ACP tool-call lifecycle for tool-like item types. For `agentMessage`, `item/completed` is always authoritative final state. When message streaming is enabled, it closes the logical `agent_message_chunk` stream with `_meta["codex-acp-bridge/completed"]=true` and emits `item.text` only when no deltas were streamed. When message streaming is disabled, visible phases (missing/null/empty or `final_answer`) project to `session/update.agent_message_chunk`; `commentary` stays hidden. For `reasoning`, completed items close any open streamed thought lane and, when `--reasoning-streaming=false`, emit one completed thought chunk per `summary[]` / `content[]` entry for the selected lanes. For `plan`, the completed item text replaces the draft text for that item and the bridge emits a full ACP plan replacement. |
+| `item/completed` | `threadId,turnId,item` | item lifecycle completed | Finalizes ACP tool-call lifecycle for tool-like item types. For `agentMessage`, `item/completed` is always authoritative final state. When message streaming is enabled, it closes the logical `agent_message_chunk` stream with `_meta["codex-acp-bridge/completed"]=true` and emits `item.text` only when no deltas were streamed. When message streaming is disabled, visible phases (missing/null/empty or `final_answer`) project to `session/update.agent_message_chunk`; `commentary` stays hidden. For `reasoning`, completed items close any open streamed thought lane; when `--reasoning-streaming=false`, they emit no ACP thought output. For `plan`, the completed item text replaces the draft text for that item and the bridge emits a full ACP plan replacement. |
 | `turn/plan/updated` | `threadId,turnId,plan` | plan snapshot update | Authoritative whole-plan snapshot. The bridge clears delta-derived preview state and emits the provided entries as the full ACP plan replacement, including an empty list when the snapshot is empty. |
 | `turn/diff/updated` | `threadId,turnId,diff` | no ACP streaming update | Diff is not emitted as thought/message/tool content. |
 | `thread/tokenUsage/updated` | `threadId,turnId,tokenUsage` | usage update | Forwards `tokenUsage.last.{inputTokens,outputTokens,totalTokens,cachedInputTokens}` into ACP meta usage (`cachedInputTokens` -> `cachedReadTokens`). |
@@ -167,7 +167,7 @@ For request types without a native ACP equivalent, the adapter uses ACP `session
 ### ACP streaming updates
 
 - Agent text: either live `agentMessage` deltas plus completion when message streaming is enabled, or phase-visible completed `agentMessage` from `item/completed` when message streaming is disabled.
-- Agent thoughts: lane-selected reasoning output, streamed from deltas when `--reasoning-streaming=true` and otherwise projected from completed reasoning items.
+- Agent thoughts: lane-selected reasoning output streamed only from deltas when `--reasoning-streaming=true`.
 - Plans: native ACP `plan` only, sourced from `item/plan/delta`, completed `plan` items, and `turn/plan/updated`.
 - Tool calls: `item/started` and `item/completed` for tool-like item types only,
   `item/commandExecution/outputDelta`,
@@ -180,6 +180,8 @@ For request types without a native ACP equivalent, the adapter uses ACP `session
 
 - Session creation/resume:
   - `session/new` starts a fresh app-server thread and returns `thread.id` as the ACP `sessionId`.
+  - `session/list` maps to backend `thread/list` and returns resumable Codex threads keyed by `thread.id`.
+  - `session/close` maps to backend `thread/unsubscribe` plus local bridge cleanup; it does not archive the thread.
   - `session/resume` passes the requested ACP `sessionId` directly to `thread/resume.threadId`.
   - `thread.sessionId` remains the backend session-tree identifier and is not used as the ACP resume handle.
   - ACP `session/load` is not implemented because the bridge does not replay prior ACP history before returning.

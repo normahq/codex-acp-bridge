@@ -31,6 +31,10 @@ func (s *lifecycleBackendSpy) ThreadList(context.Context, map[string]any) (appSe
 	return appServerThreadListResponse{}, nil
 }
 
+func (s *lifecycleBackendSpy) ThreadUnsubscribe(context.Context, string) (appServerThreadUnsubscribeResponse, error) {
+	return appServerThreadUnsubscribeResponse{}, nil
+}
+
 func (s *lifecycleBackendSpy) ThreadStart(context.Context, map[string]any) (appServerThreadStartResponse, error) {
 	return appServerThreadStartResponse{}, nil
 }

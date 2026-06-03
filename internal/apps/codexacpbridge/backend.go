@@ -49,6 +49,9 @@ type appServerInitializeResponse struct {
 type appServerThread struct {
 	ID        string `json:"id"`
 	SessionID string `json:"sessionId"`
+	Cwd       string `json:"cwd,omitempty"`
+	Name      string `json:"name,omitempty"`
+	UpdatedAt int64  `json:"updatedAt,omitempty"`
 }
 
 type appServerThreadStartResponse struct {
@@ -91,6 +94,10 @@ type appServerModelListResponse struct {
 type appServerThreadListResponse struct {
 	Data       []appServerThread `json:"data"`
 	NextCursor *string           `json:"nextCursor,omitempty"`
+}
+
+type appServerThreadUnsubscribeResponse struct {
+	Status string `json:"status"`
 }
 
 type appServerRPCResponse struct {
@@ -144,6 +151,7 @@ type appServerSession interface {
 	InitializeResponse() appServerInitializeResponse
 	Events() <-chan appServerEvent
 	ThreadList(ctx context.Context, params map[string]any) (appServerThreadListResponse, error)
+	ThreadUnsubscribe(ctx context.Context, threadID string) (appServerThreadUnsubscribeResponse, error)
 	ThreadStart(ctx context.Context, params map[string]any) (appServerThreadStartResponse, error)
 	ThreadResume(ctx context.Context, params map[string]any) (appServerThreadResumeResponse, error)
 	ThreadSettingsUpdate(ctx context.Context, params map[string]any) error
@@ -243,6 +251,17 @@ func (b *appServerBackend) ThreadList(ctx context.Context, params map[string]any
 	var resp appServerThreadListResponse
 	if err := b.call(ctx, "thread/list", params, &resp); err != nil {
 		return appServerThreadListResponse{}, err
+	}
+	return resp, nil
+}
+
+func (b *appServerBackend) ThreadUnsubscribe(ctx context.Context, threadID string) (appServerThreadUnsubscribeResponse, error) {
+	var resp appServerThreadUnsubscribeResponse
+	if strings.TrimSpace(threadID) == "" {
+		return appServerThreadUnsubscribeResponse{}, nil
+	}
+	if err := b.call(ctx, "thread/unsubscribe", map[string]any{"threadId": strings.TrimSpace(threadID)}, &resp); err != nil {
+		return appServerThreadUnsubscribeResponse{}, err
 	}
 	return resp, nil
 }

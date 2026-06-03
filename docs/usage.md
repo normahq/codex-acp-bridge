@@ -63,7 +63,7 @@ acp-repl -- codex-acp-bridge
   Stream app-server `item/agentMessage/delta` notifications as ACP `agent_message_chunk` updates.
   Default: `false`.
 - `--reasoning-streaming`:
-  Stream app-server reasoning deltas live when enabled. When disabled, emit final ACP `agent_thought_chunk` updates from completed reasoning items only.
+  Stream app-server reasoning deltas live when enabled. When disabled, suppress ACP thought output from reasoning entirely.
   Default: `true`.
 - `--reasoning-thoughts`:
   Select which reasoning lane is projected as ACP thoughts: `off`, `summary`, `content`, or `both`.
@@ -85,6 +85,12 @@ acp-repl -- codex-acp-bridge
 - Opens ACP agent-side stdio connection for clients.
 - Creates one backend session per ACP session.
 - `session/new` returns the app-server thread id (`thread.id`) as the ACP `sessionId`.
+- Supports ACP `session/list` using backend `thread/list`.
+  - `session/list` returns resumable Codex threads, not just sessions created by the current bridge process.
+  - `session/list` maps ACP `cwd` filtering directly to backend `thread/list.cwd`.
+- Supports ACP `session/close` using backend `thread/unsubscribe`.
+  - `session/close` is a transient detach operation; it does not archive or delete the underlying Codex thread.
+  - closed sessions remain resumable and listable until backend retention removes them.
 - Supports ACP `session/resume` using direct app-server `thread/resume`.
   - `session/resume` restores session state only; it does not replay prior ACP message/thought/tool updates.
   - `thread.sessionId` remains a backend session-tree identifier; it is not the ACP resume handle.
@@ -96,8 +102,8 @@ acp-repl -- codex-acp-bridge
   - streamed message chunks carry `_meta["codex-acp-bridge/itemId"]`, `_meta["codex-acp-bridge/completed"]`, and `_meta["codex-acp-bridge/phase"]`
   - `item/completed` closes the logical message; it does not complete the ACP turn
 - Optional lane-aware reasoning thoughts:
-  - `summary` projects `item/reasoning/summaryTextDelta` and completed `summary[]`
-  - `content` projects `item/reasoning/textDelta` and completed `content[]`
+  - `summary` projects `item/reasoning/summaryTextDelta`
+  - `content` projects `item/reasoning/textDelta`
   - `both` projects both lanes and keeps them distinct via `_meta`
   - thought chunks carry `_meta["codex-acp-bridge/itemId"]`, `_meta["codex-acp-bridge/reasoningKind"]`, index metadata, and `_meta["codex-acp-bridge/completed"]`
 - Supports per-session MCP servers via ACP `session/new` `mcpServers` parameter.

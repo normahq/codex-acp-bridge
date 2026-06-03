@@ -24,6 +24,7 @@ const (
 	testPlanRunTests           = "Run tests"
 	testReasoningXHigh         = "xhigh"
 	testServiceTierFlex        = "flex"
+	testThreadOne              = "thr-1"
 	testThreadLive             = "thr-live"
 )
 
@@ -161,7 +162,7 @@ func TestNewSessionAppliesCodexMetaOverridesToThreadStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession() error = %v", err)
 	}
-	if got, want := string(resp.SessionId), "thr-1"; got != want {
+	if got, want := string(resp.SessionId), testThreadOne; got != want {
 		t.Fatalf("NewSession().SessionId = %q, want %q", got, want)
 	}
 	meta := resp.Meta
@@ -314,6 +315,12 @@ func TestInitializeAdvertisesImagePromptCapability(t *testing.T) {
 	if resp.AgentCapabilities.SessionCapabilities.Resume == nil {
 		t.Fatal("sessionCapabilities.resume = nil, want non-nil")
 	}
+	if resp.AgentCapabilities.SessionCapabilities.List == nil {
+		t.Fatal("sessionCapabilities.list = nil, want non-nil")
+	}
+	if resp.AgentCapabilities.SessionCapabilities.Close == nil {
+		t.Fatal("sessionCapabilities.close = nil, want non-nil")
+	}
 }
 
 func TestLogoutReturnsEmptyResponse(t *testing.T) {
@@ -391,8 +398,8 @@ func TestSessionModeIsStoredButNotForwardedToBackendPayloads(t *testing.T) {
 	if len(threadStartParams) != 1 {
 		t.Fatalf("thread/start calls = %d, want 1", len(threadStartParams))
 	}
-	if got := stringValue(threadStartParams[0], "cwd"); got != "/tmp/work" {
-		t.Fatalf("thread/start cwd = %q, want %q", got, "/tmp/work")
+	if got := stringValue(threadStartParams[0], "cwd"); got != testCWD {
+		t.Fatalf("thread/start cwd = %q, want %q", got, testCWD)
 	}
 	if _, ok := threadStartParams[0]["mode"]; ok {
 		t.Fatalf("thread/start params unexpectedly include mode: %#v", threadStartParams[0])
@@ -639,6 +646,89 @@ func TestLoadSessionReturnsMethodNotFound(t *testing.T) {
 	}
 }
 
+func TestListSessionsMapsBackendThreadsAndCursor(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", testThreadLive, "turn-1")
+	nextCursor := "cursor-2"
+	session.threadListResponses = []appServerThreadListResponse{
+		{
+			Data: []appServerThread{
+				{ID: "thr-2", Cwd: "/tmp/b", Name: "Second", UpdatedAt: 1710000000},
+				{ID: "thr-1", Cwd: "/tmp/a", UpdatedAt: 1710000100},
+			},
+			NextCursor: &nextCursor,
+		},
+	}
+
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+
+	cursor := " cursor-1 "
+	cwd := " /tmp/filter "
+	resp, err := agent.ListSessions(context.Background(), acp.ListSessionsRequest{
+		Cursor: &cursor,
+		Cwd:    &cwd,
+	})
+	if err != nil {
+		t.Fatalf("ListSessions() error = %v", err)
+	}
+	if resp.NextCursor == nil || *resp.NextCursor != nextCursor {
+		t.Fatalf("ListSessions().NextCursor = %#v, want %q", resp.NextCursor, nextCursor)
+	}
+	if len(resp.Sessions) != 2 {
+		t.Fatalf("ListSessions().Sessions len = %d, want 2", len(resp.Sessions))
+	}
+	if got := string(resp.Sessions[0].SessionId); got != "thr-2" {
+		t.Fatalf("sessions[0].sessionId = %q, want %q", got, "thr-2")
+	}
+	if got := resp.Sessions[0].Cwd; got != "/tmp/b" {
+		t.Fatalf("sessions[0].cwd = %q, want %q", got, "/tmp/b")
+	}
+	if resp.Sessions[0].Title == nil || *resp.Sessions[0].Title != "Second" {
+		t.Fatalf("sessions[0].title = %#v, want %q", resp.Sessions[0].Title, "Second")
+	}
+	if resp.Sessions[0].UpdatedAt == nil || *resp.Sessions[0].UpdatedAt != "2024-03-09T16:00:00Z" {
+		t.Fatalf("sessions[0].updatedAt = %#v, want %q", resp.Sessions[0].UpdatedAt, "2024-03-09T16:00:00Z")
+	}
+	if resp.Sessions[1].Title != nil {
+		t.Fatalf("sessions[1].title = %#v, want nil", resp.Sessions[1].Title)
+	}
+
+	params := session.threadListParamsSnapshot()
+	if len(params) != 1 {
+		t.Fatalf("thread/list calls = %d, want 1", len(params))
+	}
+	if got := stringValue(params[0], "cursor"); got != "cursor-1" {
+		t.Fatalf("thread/list cursor = %q, want %q", got, "cursor-1")
+	}
+	if got := stringValue(params[0], "cwd"); got != "/tmp/filter" {
+		t.Fatalf("thread/list cwd = %q, want %q", got, "/tmp/filter")
+	}
+	if got, ok := boolValue(params[0], "archived"); !ok || got {
+		t.Fatalf("thread/list archived = %t (ok=%t), want false", got, ok)
+	}
+	if got := stringValue(params[0], "sortKey"); got != "updated_at" {
+		t.Fatalf("thread/list sortKey = %q, want updated_at", got)
+	}
+	if got := stringValue(params[0], "sortDirection"); got != "desc" {
+		t.Fatalf("thread/list sortDirection = %q, want desc", got)
+	}
+	sourceKinds, ok := params[0]["sourceKinds"].([]string)
+	if !ok {
+		t.Fatalf("thread/list sourceKinds type = %T, want []string", params[0]["sourceKinds"])
+	}
+	if len(sourceKinds) != len(appServerThreadListSourceKinds) {
+		t.Fatalf("thread/list sourceKinds len = %d, want %d", len(sourceKinds), len(appServerThreadListSourceKinds))
+	}
+	if got, want := session.closeCalls, 1; got != want {
+		t.Fatalf("backend close calls = %d, want %d", got, want)
+	}
+	if got, want := session.waitCalls, 1; got != want {
+		t.Fatalf("backend wait calls = %d, want %d", got, want)
+	}
+}
+
 func TestResumeSessionUsesACPIDAsThreadID(t *testing.T) {
 	session := newFakeAppServerSession("codex_test/1.0.0", "thr-legacy", "turn-1")
 	session.threadResumeResp.Thread.ID = "thr-legacy"
@@ -665,6 +755,98 @@ func TestResumeSessionUsesACPIDAsThreadID(t *testing.T) {
 	}
 	if session.threadListCalls != 0 {
 		t.Fatalf("thread/list calls = %d, want 0", session.threadListCalls)
+	}
+}
+
+func TestCloseSessionRemovesLoadedSessionAndUnsubscribes(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-close-1", "turn-1")
+	session.threadUnsubscribeResp = appServerThreadUnsubscribeResponse{Status: "unsubscribed"}
+
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+
+	cancelCalled := false
+	agent.mu.Lock()
+	agent.sessions["thr-close-1"] = &codexProxySessionState{
+		backend: session,
+		cancel: func() {
+			cancelCalled = true
+		},
+		threadID: "thr-close-1",
+		turnID:   "turn-1",
+	}
+	agent.mu.Unlock()
+
+	if _, err := agent.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: "thr-close-1"}); err != nil {
+		t.Fatalf("CloseSession() error = %v", err)
+	}
+	if !cancelCalled {
+		t.Fatal("CloseSession() did not call cancel")
+	}
+	if got, want := session.turnInterruptCalls, 1; got != want {
+		t.Fatalf("turn/interrupt calls = %d, want %d", got, want)
+	}
+	if got, want := session.lastInterruptedThreadID, "thr-close-1"; got != want {
+		t.Fatalf("interrupted threadId = %q, want %q", got, want)
+	}
+	if ids := session.threadUnsubscribeIDsSnapshot(); len(ids) != 1 || ids[0] != "thr-close-1" {
+		t.Fatalf("thread/unsubscribe ids = %#v, want [thr-close-1]", ids)
+	}
+	if got, want := session.closeCalls, 1; got != want {
+		t.Fatalf("backend close calls = %d, want %d", got, want)
+	}
+	if got, want := session.waitCalls, 1; got != want {
+		t.Fatalf("backend wait calls = %d, want %d", got, want)
+	}
+	agent.mu.Lock()
+	_, ok := agent.sessions["thr-close-1"]
+	agent.mu.Unlock()
+	if ok {
+		t.Fatal("session still registered after close")
+	}
+}
+
+func TestCloseSessionUsesTransientBackendWhenSessionNotLoaded(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-close-2", "turn-1")
+	session.threadUnsubscribeResp = appServerThreadUnsubscribeResponse{Status: "notSubscribed"}
+
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+
+	if _, err := agent.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: "thr-close-2"}); err != nil {
+		t.Fatalf("CloseSession() error = %v", err)
+	}
+	if ids := session.threadUnsubscribeIDsSnapshot(); len(ids) != 1 || ids[0] != "thr-close-2" {
+		t.Fatalf("thread/unsubscribe ids = %#v, want [thr-close-2]", ids)
+	}
+	if got, want := session.closeCalls, 1; got != want {
+		t.Fatalf("backend close calls = %d, want %d", got, want)
+	}
+	if got, want := session.waitCalls, 1; got != want {
+		t.Fatalf("backend wait calls = %d, want %d", got, want)
+	}
+}
+
+func TestCloseSessionTreatsIdempotentUnsubscribeStatusesAsSuccess(t *testing.T) {
+	statuses := []string{"unsubscribed", "notSubscribed", "notLoaded"}
+	for _, status := range statuses {
+		t.Run(status, func(t *testing.T) {
+			session := newFakeAppServerSession("codex_test/1.0.0", "thr-close-3", "turn-1")
+			session.threadUnsubscribeResp = appServerThreadUnsubscribeResponse{Status: status}
+
+			l := zerolog.Nop()
+			agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+				return session, nil
+			}, "agent", codexAppConfig{}, &l)
+
+			if _, err := agent.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: "thr-close-3"}); err != nil {
+				t.Fatalf("CloseSession() error = %v", err)
+			}
+		})
 	}
 }
 
@@ -1325,7 +1507,7 @@ func TestPromptDoesNotProjectNonToolItemLifecycleAsToolCalls(t *testing.T) {
 	}
 }
 
-func TestPromptEmitsCompletedReasoningSummaryWhenReasoningStreamingDisabled(t *testing.T) {
+func TestPromptSuppressesReasoningThoughtsWhenReasoningStreamingDisabled(t *testing.T) {
 	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
 	queueNotification(session, "item/completed", map[string]any{
 		"threadId": "thr-1",
@@ -1367,25 +1549,8 @@ func TestPromptEmitsCompletedReasoningSummaryWhenReasoningStreamingDisabled(t *t
 	}
 
 	chunks := thoughtChunks(conn.sessionUpdates(newResp.SessionId))
-	if len(chunks) != 2 {
-		t.Fatalf("thought chunk count = %d, want 2: %#v", len(chunks), chunks)
-	}
-	for i, wantText := range []string{"summary one", "summary two"} {
-		if got := thoughtChunkText(chunks[i]); got != wantText {
-			t.Fatalf("chunk[%d] text = %q, want %q", i, got, wantText)
-		}
-		if got := thoughtChunkMetaString(chunks[i], metaReasoningKindKey); got != reasoningKindSummary {
-			t.Fatalf("chunk[%d] reasoning kind = %q, want %q", i, got, reasoningKindSummary)
-		}
-		if got, ok := thoughtChunkMetaInt64(chunks[i], metaSummaryIndexKey); !ok || got != int64(i) {
-			t.Fatalf("chunk[%d] summary index = (%d,%t), want (%d,true)", i, got, ok, i)
-		}
-		if got, ok := thoughtChunkMetaBool(chunks[i], metaCompletedKey); !ok || !got {
-			t.Fatalf("chunk[%d] completed meta = (%t,%t), want (true,true)", i, got, ok)
-		}
-	}
-	if countThoughtText(conn.sessionUpdates(newResp.SessionId), "raw one") != 0 {
-		t.Fatalf("unexpected raw reasoning chunk in summary mode: %#v", chunks)
+	if len(chunks) != 0 {
+		t.Fatalf("thought chunk count = %d, want 0: %#v", len(chunks), chunks)
 	}
 }
 
@@ -3584,24 +3749,32 @@ type fakeAppServerSession struct {
 	pendingEvents  []appServerEvent
 	turnStarted    bool
 
-	threadStartResp  appServerThreadStartResponse
-	threadResumeResp appServerThreadResumeResponse
-	turnStartResp    appServerTurnStartResponse
-	threadListErr    error
-	modelListErr     error
+	threadStartResp      appServerThreadStartResponse
+	threadResumeResp     appServerThreadResumeResponse
+	turnStartResp        appServerTurnStartResponse
+	threadListErr        error
+	threadUnsubscribeErr error
+	modelListErr         error
 
-	threadListParams     []map[string]any
-	threadStartParams    []map[string]any
-	threadResumeParams   []map[string]any
-	settingsUpdateParams []map[string]any
-	turnStartParams      []map[string]any
-	modelListParams      []map[string]any
-	threadListCalls      int
-	threadListResponses  []appServerThreadListResponse
-	modelListCalls       int
-	modelListResponses   []appServerModelListResponse
-	responses            []map[string]any
-	errorResponses       []map[string]any
+	threadListParams        []map[string]any
+	threadStartParams       []map[string]any
+	threadResumeParams      []map[string]any
+	threadUnsubscribeIDs    []string
+	settingsUpdateParams    []map[string]any
+	turnStartParams         []map[string]any
+	modelListParams         []map[string]any
+	threadListCalls         int
+	threadListResponses     []appServerThreadListResponse
+	threadUnsubscribeResp   appServerThreadUnsubscribeResponse
+	modelListCalls          int
+	modelListResponses      []appServerModelListResponse
+	responses               []map[string]any
+	errorResponses          []map[string]any
+	closeCalls              int
+	waitCalls               int
+	turnInterruptCalls      int
+	lastInterruptedThreadID string
+	lastInterruptedTurnID   string
 }
 
 func newFakeAppServerSession(userAgent string, threadID string, turnID string) *fakeAppServerSession {
@@ -3674,6 +3847,16 @@ func (f *fakeAppServerSession) ThreadStart(_ context.Context, params map[string]
 	return f.threadStartResp, nil
 }
 
+func (f *fakeAppServerSession) ThreadUnsubscribe(_ context.Context, threadID string) (appServerThreadUnsubscribeResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.threadUnsubscribeIDs = append(f.threadUnsubscribeIDs, strings.TrimSpace(threadID))
+	if f.threadUnsubscribeErr != nil {
+		return appServerThreadUnsubscribeResponse{}, f.threadUnsubscribeErr
+	}
+	return f.threadUnsubscribeResp, nil
+}
+
 func (f *fakeAppServerSession) ThreadResume(_ context.Context, params map[string]any) (appServerThreadResumeResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -3719,7 +3902,12 @@ func (f *fakeAppServerSession) ModelList(_ context.Context, params map[string]an
 	return resp, nil
 }
 
-func (f *fakeAppServerSession) TurnInterrupt(_ context.Context, _ string, _ string) error {
+func (f *fakeAppServerSession) TurnInterrupt(_ context.Context, threadID string, turnID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.turnInterruptCalls++
+	f.lastInterruptedThreadID = strings.TrimSpace(threadID)
+	f.lastInterruptedTurnID = strings.TrimSpace(turnID)
 	return nil
 }
 
@@ -3745,8 +3933,19 @@ func (f *fakeAppServerSession) RespondRequestError(_ context.Context, _ *appServ
 	return nil
 }
 
-func (f *fakeAppServerSession) Close() error { return nil }
-func (f *fakeAppServerSession) Wait() error  { return nil }
+func (f *fakeAppServerSession) Close() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.closeCalls++
+	return nil
+}
+
+func (f *fakeAppServerSession) Wait() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.waitCalls++
+	return nil
+}
 
 func (f *fakeAppServerSession) responsesSnapshot() []map[string]any {
 	f.mu.Lock()
@@ -3788,6 +3987,14 @@ func (f *fakeAppServerSession) modelListParamsSnapshot() []map[string]any {
 	return out
 }
 
+func (f *fakeAppServerSession) threadListParamsSnapshot() []map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]map[string]any, len(f.threadListParams))
+	copy(out, f.threadListParams)
+	return out
+}
+
 func (f *fakeAppServerSession) threadResumeParamsSnapshot() []map[string]any {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -3801,6 +4008,14 @@ func (f *fakeAppServerSession) settingsUpdateParamsSnapshot() []map[string]any {
 	defer f.mu.Unlock()
 	out := make([]map[string]any, len(f.settingsUpdateParams))
 	copy(out, f.settingsUpdateParams)
+	return out
+}
+
+func (f *fakeAppServerSession) threadUnsubscribeIDsSnapshot() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.threadUnsubscribeIDs))
+	copy(out, f.threadUnsubscribeIDs)
 	return out
 }
 
@@ -3955,26 +4170,6 @@ func thoughtChunkMetaBool(chunk *acp.SessionUpdateAgentThoughtChunk, key string)
 	}
 	b, ok := v.(bool)
 	return b, ok
-}
-
-func thoughtChunkMetaInt64(chunk *acp.SessionUpdateAgentThoughtChunk, key string) (int64, bool) {
-	if chunk == nil || chunk.Meta == nil {
-		return 0, false
-	}
-	v, ok := chunk.Meta[key]
-	if !ok || v == nil {
-		return 0, false
-	}
-	switch typed := v.(type) {
-	case float64:
-		return int64(typed), true
-	case int64:
-		return typed, true
-	case int:
-		return int64(typed), true
-	default:
-		return 0, false
-	}
 }
 
 func requireReasoningEffortOption(t *testing.T, options []acp.SessionConfigOption) *acp.SessionConfigOptionSelect {

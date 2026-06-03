@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	acp "github.com/coder/acp-go-sdk"
 	"github.com/rs/zerolog"
@@ -207,6 +208,8 @@ func (a *codexACPProxyAgent) Initialize(_ context.Context, _ acp.InitializeReque
 				EmbeddedContext: false,
 			},
 			SessionCapabilities: acp.SessionCapabilities{
+				Close:  &acp.SessionCloseCapabilities{},
+				List:   &acp.SessionListCapabilities{},
 				Resume: &acp.SessionResumeCapabilities{},
 			},
 		},
@@ -236,15 +239,72 @@ func (a *codexACPProxyAgent) Cancel(ctx context.Context, params acp.CancelNotifi
 	return nil
 }
 
-func (a *codexACPProxyAgent) ListSessions(_ context.Context, _ acp.ListSessionsRequest) (acp.ListSessionsResponse, error) {
-	return acp.ListSessionsResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionList)
+func (a *codexACPProxyAgent) ListSessions(ctx context.Context, params acp.ListSessionsRequest) (acp.ListSessionsResponse, error) {
+	if err := a.rejectIfShuttingDown(); err != nil {
+		return acp.ListSessionsResponse{}, err
+	}
+
+	backend, err := a.startSessionBackend(ctx, derefTrimmedString(params.Cwd))
+	if err != nil {
+		return acp.ListSessionsResponse{}, err
+	}
+	defer func() {
+		_ = backend.Close()
+		_ = backend.Wait()
+	}()
+
+	listResp, err := backend.ThreadList(ctx, buildThreadListParams(params.Cursor, params.Cwd))
+	if err != nil {
+		return acp.ListSessionsResponse{}, fmt.Errorf("thread/list: %w", err)
+	}
+
+	sessions := make([]acp.SessionInfo, 0, len(listResp.Data))
+	for _, thread := range listResp.Data {
+		sessions = append(sessions, sessionInfoFromAppServerThread(thread))
+	}
+	return acp.ListSessionsResponse{
+		NextCursor: listResp.NextCursor,
+		Sessions:   sessions,
+	}, nil
 }
 
 func (a *codexACPProxyAgent) CloseSession(
-	_ context.Context,
-	_ acp.CloseSessionRequest,
+	ctx context.Context,
+	params acp.CloseSessionRequest,
 ) (acp.CloseSessionResponse, error) {
-	return acp.CloseSessionResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionClose)
+	if err := a.rejectIfShuttingDown(); err != nil {
+		return acp.CloseSessionResponse{}, err
+	}
+	sessionID := acp.SessionId(strings.TrimSpace(string(params.SessionId)))
+	if sessionID == "" {
+		return acp.CloseSessionResponse{}, acp.NewInvalidParams("session not found")
+	}
+
+	a.mu.Lock()
+	state, ok := a.sessions[sessionID]
+	if ok {
+		delete(a.sessions, sessionID)
+	}
+	a.mu.Unlock()
+
+	if ok {
+		a.closeLoadedSession(ctx, state)
+		return acp.CloseSessionResponse{}, nil
+	}
+
+	backend, err := a.startSessionBackend(ctx, "")
+	if err != nil {
+		return acp.CloseSessionResponse{}, err
+	}
+	defer func() {
+		_ = backend.Close()
+		_ = backend.Wait()
+	}()
+
+	if err := unsubscribeThread(ctx, backend, string(sessionID)); err != nil {
+		return acp.CloseSessionResponse{}, fmt.Errorf("thread/unsubscribe: %w", err)
+	}
+	return acp.CloseSessionResponse{}, nil
 }
 
 func (a *codexACPProxyAgent) NewSession(ctx context.Context, params acp.NewSessionRequest) (acp.NewSessionResponse, error) {
@@ -482,6 +542,22 @@ func (a *codexACPProxyAgent) closeSessionState(state *codexProxySessionState) {
 		_ = state.backend.Close()
 		_ = state.backend.Wait()
 	}
+}
+
+func (a *codexACPProxyAgent) closeLoadedSession(ctx context.Context, state *codexProxySessionState) {
+	if state == nil {
+		return
+	}
+	defer a.closeSessionState(state)
+
+	if state.cancel != nil {
+		state.cancel()
+	}
+	if state.backend == nil {
+		return
+	}
+	_ = state.backend.TurnInterrupt(ctx, state.threadID, state.turnID)
+	_ = unsubscribeThread(ctx, state.backend, state.threadID)
 }
 
 func newSessionStateFromThreadStart(
@@ -2797,16 +2873,6 @@ func (a *codexACPProxyAgent) handleCompletedReasoning(ctx context.Context, sessi
 		}
 		return nil
 	}
-	if a.reasoningThoughtsIncludeSummary() {
-		if err := a.emitCompletedReasoningTexts(ctx, sessionID, itemID, reasoningKindSummary, summaryTexts); err != nil {
-			return err
-		}
-	}
-	if a.reasoningThoughtsIncludeContent() {
-		if err := a.emitCompletedReasoningTexts(ctx, sessionID, itemID, reasoningKindContent, contentTexts); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -3153,6 +3219,51 @@ func (a *codexACPProxyAgent) clearSessionBackend(sessionID acp.SessionId, backen
 	state.threadID = ""
 	state.turnID = ""
 	state.pendingRequests = nil
+}
+
+func unsubscribeThread(ctx context.Context, backend appServerSession, threadID string) error {
+	if backend == nil || strings.TrimSpace(threadID) == "" {
+		return nil
+	}
+	resp, err := backend.ThreadUnsubscribe(ctx, threadID)
+	if err != nil {
+		return err
+	}
+	switch strings.TrimSpace(resp.Status) {
+	case "", "unsubscribed", "notSubscribed", "notLoaded":
+		return nil
+	default:
+		return fmt.Errorf("unexpected unsubscribe status %q", resp.Status)
+	}
+}
+
+func sessionInfoFromAppServerThread(thread appServerThread) acp.SessionInfo {
+	info := acp.SessionInfo{
+		Cwd:       strings.TrimSpace(thread.Cwd),
+		SessionId: acp.SessionId(strings.TrimSpace(thread.ID)),
+	}
+	if title := strings.TrimSpace(thread.Name); title != "" {
+		info.Title = &title
+	}
+	if updatedAt := formatSessionUpdatedAt(thread.UpdatedAt); updatedAt != nil {
+		info.UpdatedAt = updatedAt
+	}
+	return info
+}
+
+func formatSessionUpdatedAt(updatedAtUnix int64) *string {
+	if updatedAtUnix <= 0 {
+		return nil
+	}
+	formatted := time.Unix(updatedAtUnix, 0).UTC().Format(time.RFC3339)
+	return &formatted
+}
+
+func derefTrimmedString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(*value)
 }
 
 func (a *codexACPProxyAgent) syncThreadID(sessionID acp.SessionId, nextThreadID string) {

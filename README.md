@@ -54,7 +54,7 @@ codex-acp-bridge
 
 ## What The Bridge Provides
 
-- ACP `initialize`, `session/new`, `session/prompt`, `session/cancel`, and `session/resume` backed by Codex app-server threads.
+- ACP `initialize`, `session/new`, `session/prompt`, `session/cancel`, `session/list`, `session/close`, and `session/resume` backed by Codex app-server threads.
 - Durable ACP session IDs mapped directly to Codex app-server `thread.id` values.
 - ACP-native model handling through `session/new.models` and `session/set_model`.
 - ACP session configuration for model-advertised reasoning effort values.

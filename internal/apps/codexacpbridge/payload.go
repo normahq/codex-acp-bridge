@@ -18,6 +18,19 @@ const (
 	itemTypeDynamicToolCall  = "dynamicToolCall"
 )
 
+var appServerThreadListSourceKinds = []string{
+	"cli",
+	"vscode",
+	"exec",
+	"appServer",
+	"subAgent",
+	"subAgentReview",
+	"subAgentCompact",
+	"subAgentThreadSpawn",
+	"subAgentOther",
+	"unknown",
+}
+
 func buildThreadStartParams(cwd string, cfg codexAppConfig, sessionModel string, sessionMCPServers map[string]acp.McpServer) map[string]any {
 	params := buildThreadSessionParamsBase(cwd, cfg, sessionModel, sessionMCPServers)
 	params["experimentalRawEvents"] = false
@@ -47,6 +60,26 @@ func buildThreadSettingsUpdateParams(threadID string, model string, reasoningEff
 	}
 	if trimmedReasoningEffort := strings.TrimSpace(reasoningEffort); trimmedReasoningEffort != "" {
 		params["effort"] = trimmedReasoningEffort
+	}
+	return params
+}
+
+func buildThreadListParams(cursor *string, cwd *string) map[string]any {
+	params := map[string]any{
+		"archived":      false,
+		"sortKey":       "updated_at",
+		"sortDirection": "desc",
+		"sourceKinds":   append([]string(nil), appServerThreadListSourceKinds...),
+	}
+	if cursor != nil {
+		if trimmedCursor := strings.TrimSpace(*cursor); trimmedCursor != "" {
+			params["cursor"] = trimmedCursor
+		}
+	}
+	if cwd != nil {
+		if trimmedCWD := strings.TrimSpace(*cwd); trimmedCWD != "" {
+			params["cwd"] = trimmedCWD
+		}
 	}
 	return params
 }

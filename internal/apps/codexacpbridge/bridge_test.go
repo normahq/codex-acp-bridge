@@ -28,6 +28,10 @@ func (s *appServerSessionSpy) ThreadList(context.Context, map[string]any) (appSe
 	return appServerThreadListResponse{}, nil
 }
 
+func (s *appServerSessionSpy) ThreadUnsubscribe(context.Context, string) (appServerThreadUnsubscribeResponse, error) {
+	return appServerThreadUnsubscribeResponse{}, nil
+}
+
 func (s *appServerSessionSpy) ThreadStart(context.Context, map[string]any) (appServerThreadStartResponse, error) {
 	return appServerThreadStartResponse{}, nil
 }

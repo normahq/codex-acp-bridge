@@ -54,6 +54,12 @@ func TestCodexACPIntegrationInitializeCapabilities(t *testing.T) {
 	if caps.SessionCapabilities.Resume == nil {
 		t.Fatal("initialize sessionCapabilities.resume = nil, want non-nil")
 	}
+	if caps.SessionCapabilities.List == nil {
+		t.Fatal("initialize sessionCapabilities.list = nil, want non-nil")
+	}
+	if caps.SessionCapabilities.Close == nil {
+		t.Fatal("initialize sessionCapabilities.close = nil, want non-nil")
+	}
 }
 
 func TestCodexACPIntegrationNewSessionExposesModels(t *testing.T) {
