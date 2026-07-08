@@ -115,15 +115,17 @@ acp-repl -- codex-acp-bridge
   - MCP startup visibility:
     - `session/new._meta.codex.mcp` includes `contract` and requested server descriptors.
     - `session/prompt._meta.codex.mcp.startupStatus` includes latest startup status/error for requested servers.
-- Supports `session/set_model` and `session/set_mode` for ACP session state.
-  - `session/set_model` accepts only model IDs advertised by app-server `model/list`, updates model selection used by subsequent `turn/start` calls, and persists it to app-server thread settings when the thread already exists.
+- Supports stable `session/set_config_option` for ACP session state, with `session/set_model` and `session/set_mode` kept for compatibility.
+  - `session/set_config_option` with config ID `model` accepts only model IDs advertised by app-server `model/list`, updates model selection used by subsequent `turn/start` calls, and persists it to app-server thread settings when the thread already exists.
+  - `session/set_model` uses the same model validation and persistence path for older clients.
   - `session/set_mode` is stored in ACP session state only; current bridge implementation does not forward mode into backend `thread/start` or `turn/start` payload fields.
 - Supports ACP session configuration options for reasoning effort.
   - `session/new.configOptions` includes a `reasoning_effort` select option when app-server `model/list` advertises reasoning efforts for the current model.
   - `session/set_config_option` with `configId=reasoning_effort` updates the effort used by subsequent `turn/start.effort` payloads and persists it to app-server thread settings when the thread already exists.
   - Supported values are model-advertised and may include values such as `minimal`, `low`, `medium`, `high`, or `xhigh`.
-- Populates ACP `session/new.models` from app-server `model/list` when available.
-- Model selection is ACP-native; prefer `session/set_model`.
+- Populates ACP `session/new.configOptions` with model and reasoning settings from app-server `model/list` when available.
+- Also populates ACP `session/new.models` for clients that still use the legacy model state.
+- Model selection is ACP-native; prefer `session/set_config_option` with config ID `model`.
 - `session/prompt._meta.error` preserves raw provider/app-server terminal error details for `error(willRetry=false)` and `turn/completed(status=failed)` when the backend provides them.
 - Prompt content support:
   - Text and image prompt blocks are supported (`PromptCapabilities.image=true`).

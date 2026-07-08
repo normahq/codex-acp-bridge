@@ -27,7 +27,7 @@ go tool golangci-lint run
 
 - Keep ACP contract compatibility stable.
 - Keep strict validation for `session/new._meta.codex`.
-- Keep model handling ACP-native (`session/set_model`), not bridge-specific model CLI flags.
+- Keep model handling ACP-native (`session/set_config_option` with config ID `model`), keep legacy `session/set_model` compatibility, and do not add bridge-specific model CLI flags.
 - Keep MCP transport constraints aligned with implementation (`stdio` and `http`, reject `sse`).
 
 ## Documentation

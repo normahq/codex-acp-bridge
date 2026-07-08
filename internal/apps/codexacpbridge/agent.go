@@ -33,11 +33,14 @@ const (
 	methodReasoningSummaryTextDelta = "item/reasoning/summaryTextDelta"
 	methodReasoningSummaryPartAdded = "item/reasoning/summaryPartAdded"
 
+	sessionConfigIDModel                 = "model"
 	sessionConfigIDReasoningEffort       = "reasoning_effort"
 	sessionConfigCategoryThoughtLevel    = "thought_level"
+	sessionConfigNameModel               = "Model"
 	sessionConfigNameReasoningEffort     = "Reasoning Effort"
 	sessionConfigTypeSelect              = "select"
 	sessionConfigTypeBoolean             = "boolean"
+	sessionConfigOptionModelRequired     = "model must be a string value"
 	sessionConfigOptionValueUnsupported  = "session config option value is not supported"
 	sessionConfigOptionIDUnsupported     = "session config option is not supported"
 	sessionConfigOptionReasoningRequired = "reasoning effort must be a string value"
@@ -744,24 +747,44 @@ func (a *codexACPProxyAgent) SetSessionConfigOption(
 	}
 	req := params.ValueId
 	if req == nil {
-		if params.Boolean != nil && strings.TrimSpace(string(params.Boolean.ConfigId)) != sessionConfigIDReasoningEffort {
-			return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(sessionConfigOptionIDUnsupported)
+		if params.Boolean != nil {
+			switch strings.TrimSpace(string(params.Boolean.ConfigId)) {
+			case sessionConfigIDModel:
+				return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(sessionConfigOptionModelRequired)
+			case sessionConfigIDReasoningEffort:
+				return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(sessionConfigOptionReasoningRequired)
+			default:
+				return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(sessionConfigOptionIDUnsupported)
+			}
 		}
-		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(sessionConfigOptionReasoningRequired)
-	}
-	if strings.TrimSpace(string(req.ConfigId)) != sessionConfigIDReasoningEffort {
-		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(sessionConfigOptionIDUnsupported)
-	}
-	nextEffort := strings.TrimSpace(string(req.Value))
-	if nextEffort == "" {
 		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(sessionConfigOptionValueUnsupported)
 	}
 
-	configOptions, err := a.setSessionReasoningEffort(ctx, req.SessionId, nextEffort)
-	if err != nil {
-		return acp.SetSessionConfigOptionResponse{}, err
+	switch strings.TrimSpace(string(req.ConfigId)) {
+	case sessionConfigIDModel:
+		nextModel := strings.TrimSpace(string(req.Value))
+		if nextModel == "" {
+			return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(sessionConfigOptionValueUnsupported)
+		}
+		configOptions, err := a.setSessionModel(ctx, req.SessionId, nextModel)
+		if err != nil {
+			return acp.SetSessionConfigOptionResponse{}, err
+		}
+		return acp.SetSessionConfigOptionResponse{ConfigOptions: configOptions}, nil
+	case sessionConfigIDReasoningEffort:
+		nextEffort := strings.TrimSpace(string(req.Value))
+		if nextEffort == "" {
+			return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(sessionConfigOptionValueUnsupported)
+		}
+
+		configOptions, err := a.setSessionReasoningEffort(ctx, req.SessionId, nextEffort)
+		if err != nil {
+			return acp.SetSessionConfigOptionResponse{}, err
+		}
+		return acp.SetSessionConfigOptionResponse{ConfigOptions: configOptions}, nil
+	default:
+		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(sessionConfigOptionIDUnsupported)
 	}
-	return acp.SetSessionConfigOptionResponse{ConfigOptions: configOptions}, nil
 }
 
 func (a *codexACPProxyAgent) SetSessionMode(_ context.Context, params acp.SetSessionModeRequest) (acp.SetSessionModeResponse, error) {
@@ -793,61 +816,9 @@ func (a *codexACPProxyAgent) UnstableSetSessionModel(
 	if nextModel == "" {
 		return acp.UnstableSetSessionModelResponse{}, acp.NewInvalidParams("session model is not supported")
 	}
-	a.mu.Lock()
-	if a.shuttingDown {
-		a.mu.Unlock()
-		return acp.UnstableSetSessionModelResponse{}, errors.New(errBridgeShuttingDown)
-	}
-	state, ok := a.sessions[params.SessionId]
-	if !ok {
-		a.mu.Unlock()
-		return acp.UnstableSetSessionModelResponse{}, acp.NewInvalidParams("session not found")
-	}
-	if state.done != nil {
-		a.mu.Unlock()
-		return acp.UnstableSetSessionModelResponse{}, acp.NewInvalidRequest("cannot update session model while prompt is active")
-	}
-	backend := state.backend
-	threadID := state.threadID
-	previousModel := state.model
-	a.mu.Unlock()
-
-	if backend == nil {
-		return acp.UnstableSetSessionModelResponse{}, errors.New(errSessionBackendUnavailable)
-	}
-
-	models, err := listAppServerModels(ctx, backend)
+	configOptions, err := a.setSessionModel(ctx, params.SessionId, nextModel)
 	if err != nil {
 		return acp.UnstableSetSessionModelResponse{}, err
-	}
-	selectedModel, ok := findAppServerModel(models, nextModel)
-	if !ok {
-		return acp.UnstableSetSessionModelResponse{}, acp.NewInvalidParams("session model is not supported")
-	}
-	selectedModelID := strings.TrimSpace(selectedModel.ID)
-
-	a.mu.Lock()
-	if state := a.sessions[params.SessionId]; state != nil && state.done == nil {
-		state.model = selectedModelID
-	}
-	a.mu.Unlock()
-
-	if err := persistSessionSettingsUpdate(ctx, backend, threadID, selectedModelID, ""); err != nil {
-		a.mu.Lock()
-		if state := a.sessions[params.SessionId]; state != nil && state.done == nil && state.model == selectedModelID {
-			state.model = previousModel
-		}
-		a.mu.Unlock()
-		return acp.UnstableSetSessionModelResponse{}, err
-	}
-
-	_, configOptions, err := a.buildSessionModelConfigState(ctx, params.SessionId)
-	if err != nil {
-		a.logger.Warn().
-			Err(err).
-			Str("session_id", string(params.SessionId)).
-			Msg("model/list unavailable; continuing without session config option update")
-		return acp.UnstableSetSessionModelResponse{}, nil
 	}
 	if len(configOptions) > 0 {
 		_ = a.sendUpdate(ctx, params.SessionId, acp.SessionUpdate{
@@ -983,19 +954,32 @@ func (a *codexACPProxyAgent) buildSessionModelConfigState(
 	if err != nil {
 		return nil, nil, err
 	}
+	modelState, configOptions := a.buildSessionModelConfigStateFromModels(
+		sessionID,
+		models,
+		currentModelID,
+		currentReasoningEffort,
+	)
+	return modelState, configOptions, nil
+}
+
+func (a *codexACPProxyAgent) buildSessionModelConfigStateFromModels(
+	sessionID acp.SessionId,
+	models []appServerModel,
+	currentModelID string,
+	currentReasoningEffort string,
+) (*acp.SessionModelState, []acp.SessionConfigOption) {
 	if len(models) == 0 {
-		return nil, nil, nil
+		return nil, nil
 	}
 
 	availableModels := make([]acp.ModelInfo, 0, len(models))
 	defaultModelID := ""
-	modelByID := make(map[string]appServerModel, len(models))
 	for _, model := range models {
 		modelID := strings.TrimSpace(model.ID)
 		if modelID == "" {
 			continue
 		}
-		modelByID[modelID] = model
 		modelName := strings.TrimSpace(model.DisplayName)
 		if modelName == "" {
 			modelName = modelID
@@ -1017,7 +1001,7 @@ func (a *codexACPProxyAgent) buildSessionModelConfigState(
 		}
 	}
 	if len(availableModels) == 0 {
-		return nil, nil, nil
+		return nil, nil
 	}
 
 	if currentModelID == "" {
@@ -1031,8 +1015,11 @@ func (a *codexACPProxyAgent) buildSessionModelConfigState(
 	selectedModel, hasSelectedModel := selectAppServerModel(models, currentModelID)
 	if hasSelectedModel {
 		currentModelID = strings.TrimSpace(selectedModel.ID)
+		if option, ok := modelConfigOption(models, currentModelID); ok {
+			configOptions = append(configOptions, option)
+		}
 		if option, selectedEffort, ok := reasoningEffortConfigOption(selectedModel, currentReasoningEffort, ""); ok {
-			configOptions = []acp.SessionConfigOption{option}
+			configOptions = append(configOptions, option)
 			a.mu.Lock()
 			if state := a.sessions[sessionID]; state != nil {
 				state.model = currentModelID
@@ -1043,6 +1030,7 @@ func (a *codexACPProxyAgent) buildSessionModelConfigState(
 			a.mu.Lock()
 			if state := a.sessions[sessionID]; state != nil {
 				state.model = currentModelID
+				state.reasoningEffort = ""
 			}
 			a.mu.Unlock()
 		}
@@ -1051,7 +1039,70 @@ func (a *codexACPProxyAgent) buildSessionModelConfigState(
 	return &acp.SessionModelState{
 		CurrentModelId:  acp.ModelId(currentModelID),
 		AvailableModels: availableModels,
-	}, configOptions, nil
+	}, configOptions
+}
+
+func (a *codexACPProxyAgent) setSessionModel(
+	ctx context.Context,
+	sessionID acp.SessionId,
+	nextModel string,
+) ([]acp.SessionConfigOption, error) {
+	a.mu.Lock()
+	if a.shuttingDown {
+		a.mu.Unlock()
+		return nil, errors.New(errBridgeShuttingDown)
+	}
+	state, ok := a.sessions[sessionID]
+	if !ok {
+		a.mu.Unlock()
+		return nil, acp.NewInvalidParams("session not found")
+	}
+	if state.done != nil {
+		a.mu.Unlock()
+		return nil, acp.NewInvalidRequest("cannot update session model while prompt is active")
+	}
+	backend := state.backend
+	threadID := state.threadID
+	previousModel := state.model
+	currentReasoningEffort := state.reasoningEffort
+	a.mu.Unlock()
+
+	if backend == nil {
+		return nil, errors.New(errSessionBackendUnavailable)
+	}
+
+	models, err := listAppServerModels(ctx, backend)
+	if err != nil {
+		return nil, err
+	}
+	selectedModel, ok := findAppServerModel(models, nextModel)
+	if !ok {
+		return nil, acp.NewInvalidParams("session model is not supported")
+	}
+	selectedModelID := strings.TrimSpace(selectedModel.ID)
+
+	a.mu.Lock()
+	if state := a.sessions[sessionID]; state != nil && state.done == nil {
+		state.model = selectedModelID
+	}
+	a.mu.Unlock()
+
+	if err := persistSessionSettingsUpdate(ctx, backend, threadID, selectedModelID, ""); err != nil {
+		a.mu.Lock()
+		if state := a.sessions[sessionID]; state != nil && state.done == nil && state.model == selectedModelID {
+			state.model = previousModel
+		}
+		a.mu.Unlock()
+		return nil, err
+	}
+
+	_, configOptions := a.buildSessionModelConfigStateFromModels(
+		sessionID,
+		models,
+		selectedModelID,
+		currentReasoningEffort,
+	)
+	return configOptions, nil
 }
 
 func (a *codexACPProxyAgent) setSessionReasoningEffort(
@@ -1082,7 +1133,7 @@ func (a *codexACPProxyAgent) setSessionReasoningEffort(
 	if !ok {
 		return nil, acp.NewInvalidParams(sessionConfigOptionIDUnsupported)
 	}
-	option, selectedEffort, ok := reasoningEffortConfigOption(model, "", nextEffort)
+	_, selectedEffort, ok := reasoningEffortConfigOption(model, "", nextEffort)
 	if !ok {
 		return nil, acp.NewInvalidParams(sessionConfigOptionIDUnsupported)
 	}
@@ -1108,7 +1159,8 @@ func (a *codexACPProxyAgent) setSessionReasoningEffort(
 		return nil, err
 	}
 
-	return []acp.SessionConfigOption{option}, nil
+	_, configOptions := a.buildSessionModelConfigStateFromModels(sessionID, models, currentModelID, selectedEffort)
+	return configOptions, nil
 }
 
 func persistSessionSettingsUpdate(
@@ -1147,6 +1199,50 @@ func selectAppServerModel(models []appServerModel, modelID string) (appServerMod
 		}
 	}
 	return appServerModel{}, false
+}
+
+func modelConfigOption(models []appServerModel, currentModelID string) (acp.SessionConfigOption, bool) {
+	options := make(acp.SessionConfigSelectOptionsUngrouped, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		modelID := strings.TrimSpace(model.ID)
+		if modelID == "" {
+			continue
+		}
+		if _, ok := seen[modelID]; ok {
+			continue
+		}
+		seen[modelID] = struct{}{}
+		name := strings.TrimSpace(model.DisplayName)
+		if name == "" {
+			name = modelID
+		}
+		option := acp.SessionConfigSelectOption{
+			Name:  name,
+			Value: acp.SessionConfigValueId(modelID),
+		}
+		if model.Description != nil {
+			description := strings.TrimSpace(*model.Description)
+			if description != "" {
+				option.Description = &description
+			}
+		}
+		options = append(options, option)
+	}
+	if len(options) == 0 {
+		return acp.SessionConfigOption{}, false
+	}
+	category := acp.SessionConfigOptionCategoryModel
+	return acp.SessionConfigOption{
+		Select: &acp.SessionConfigOptionSelect{
+			Type:         sessionConfigTypeSelect,
+			Id:           acp.SessionConfigId(sessionConfigIDModel),
+			Name:         sessionConfigNameModel,
+			Category:     &category,
+			CurrentValue: acp.SessionConfigValueId(currentModelID),
+			Options:      acp.SessionConfigSelectOptions{Ungrouped: &options},
+		},
+	}, true
 }
 
 func reasoningEffortConfigOption(

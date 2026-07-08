@@ -13,7 +13,10 @@ import (
 	"github.com/rs/zerolog"
 )
 
-const testModelGPT54 = "gpt-5.4"
+const (
+	testModelGPT54 = "gpt-5.4"
+	testModelGPT55 = "gpt-5.5"
+)
 
 const (
 	testApprovalOnRequest      = "on-request"
@@ -341,9 +344,9 @@ func TestLogoutReturnsEmptyResponse(t *testing.T) {
 func TestSessionModeIsStoredButNotForwardedToBackendPayloads(t *testing.T) {
 	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
 	session.modelListResponses = []appServerModelListResponse{
-		{Data: []appServerModel{{ID: testModelGPT54, DisplayName: "GPT-5.4", IsDefault: true}, {ID: "gpt-5.5", DisplayName: "GPT-5.5"}}},
-		{Data: []appServerModel{{ID: testModelGPT54, DisplayName: "GPT-5.4", IsDefault: true}, {ID: "gpt-5.5", DisplayName: "GPT-5.5"}}},
-		{Data: []appServerModel{{ID: testModelGPT54, DisplayName: "GPT-5.4", IsDefault: true}, {ID: "gpt-5.5", DisplayName: "GPT-5.5"}}},
+		{Data: []appServerModel{{ID: testModelGPT54, DisplayName: "GPT-5.4", IsDefault: true}, {ID: testModelGPT55, DisplayName: "GPT-5.5"}}},
+		{Data: []appServerModel{{ID: testModelGPT54, DisplayName: "GPT-5.4", IsDefault: true}, {ID: testModelGPT55, DisplayName: "GPT-5.5"}}},
+		{Data: []appServerModel{{ID: testModelGPT54, DisplayName: "GPT-5.4", IsDefault: true}, {ID: testModelGPT55, DisplayName: "GPT-5.5"}}},
 	}
 	queueNotification(session, "turn/completed", map[string]any{
 		"threadId": "thr-1",
@@ -375,7 +378,7 @@ func TestSessionModeIsStoredButNotForwardedToBackendPayloads(t *testing.T) {
 
 	if _, err := agent.UnstableSetSessionModel(context.Background(), acp.UnstableSetSessionModelRequest{
 		SessionId: newResp.SessionId,
-		ModelId:   acp.UnstableModelId("gpt-5.5"),
+		ModelId:   acp.UnstableModelId(testModelGPT55),
 	}); err != nil {
 		t.Fatalf("UnstableSetSessionModel() error = %v", err)
 	}
@@ -383,8 +386,8 @@ func TestSessionModeIsStoredButNotForwardedToBackendPayloads(t *testing.T) {
 	if len(settingsUpdates) != 1 {
 		t.Fatalf("thread/settings/update calls = %d, want 1", len(settingsUpdates))
 	}
-	if got := stringValue(settingsUpdates[0], "model"); got != "gpt-5.5" {
-		t.Fatalf("thread/settings/update model = %q, want %q", got, "gpt-5.5")
+	if got := stringValue(settingsUpdates[0], "model"); got != testModelGPT55 {
+		t.Fatalf("thread/settings/update model = %q, want %q", got, testModelGPT55)
 	}
 
 	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
@@ -409,8 +412,8 @@ func TestSessionModeIsStoredButNotForwardedToBackendPayloads(t *testing.T) {
 	if len(turnStartParams) != 1 {
 		t.Fatalf("turn/start calls = %d, want 1", len(turnStartParams))
 	}
-	if got := stringValue(turnStartParams[0], "model"); got != "gpt-5.5" {
-		t.Fatalf("turn/start model = %q, want %q", got, "gpt-5.5")
+	if got := stringValue(turnStartParams[0], "model"); got != testModelGPT55 {
+		t.Fatalf("turn/start model = %q, want %q", got, testModelGPT55)
 	}
 	if _, ok := turnStartParams[0]["mode"]; ok {
 		t.Fatalf("turn/start params unexpectedly include mode: %#v", turnStartParams[0])
@@ -620,6 +623,16 @@ func TestNewSessionIncludesModelsFromModelList(t *testing.T) {
 	}
 	if got := string(resp.Models.AvailableModels[0].ModelId); got != "gpt-5.4" {
 		t.Fatalf("available models[0].modelId = %q, want %q", got, "gpt-5.4")
+	}
+	option := requireModelOption(t, resp.ConfigOptions)
+	if got := option.CurrentValue; got != acp.SessionConfigValueId("gpt-5.4") {
+		t.Fatalf("model config current value = %q, want %q", got, "gpt-5.4")
+	}
+	if option.Category == nil || *option.Category != acp.SessionConfigOptionCategoryModel {
+		t.Fatalf("model config category = %#v, want model", option.Category)
+	}
+	if !modelOptionsInclude(option, "gpt-5.4-mini") {
+		t.Fatalf("model config options missing gpt-5.4-mini: %#v", option.Options)
 	}
 }
 
@@ -947,6 +960,11 @@ func TestSetSessionConfigOptionReasoningEffortAppliesToNextTurn(t *testing.T) {
 				appServerModelWithReasoning("gpt-5.4", true, "medium", "low", "medium", "high", testReasoningXHigh),
 			},
 		},
+		{
+			Data: []appServerModel{
+				appServerModelWithReasoning("gpt-5.4", true, "medium", "low", "medium", "high", testReasoningXHigh),
+			},
+		},
 	}
 	queueNotification(session, "turn/completed", map[string]any{
 		"threadId": "thr-1",
@@ -1002,6 +1020,90 @@ func TestSetSessionConfigOptionReasoningEffortAppliesToNextTurn(t *testing.T) {
 	}
 	if got := stringValue(turnStartParams[0], "effort"); got != testReasoningXHigh {
 		t.Fatalf("turn/start effort = %q, want xhigh", got)
+	}
+}
+
+func TestSetSessionConfigOptionModelAppliesToNextTurn(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	session.modelListResponses = []appServerModelListResponse{
+		{
+			Data: []appServerModel{
+				appServerModelWithReasoning("gpt-5.4", true, "medium", "low", "medium", "high"),
+				appServerModelWithReasoning(testModelGPT55, false, "high", "high", testReasoningXHigh),
+			},
+		},
+		{
+			Data: []appServerModel{
+				appServerModelWithReasoning("gpt-5.4", true, "medium", "low", "medium", "high"),
+				appServerModelWithReasoning(testModelGPT55, false, "high", "high", testReasoningXHigh),
+			},
+		},
+		{
+			Data: []appServerModel{
+				appServerModelWithReasoning("gpt-5.4", true, "medium", "low", "medium", "high"),
+				appServerModelWithReasoning(testModelGPT55, false, "high", "high", testReasoningXHigh),
+			},
+		},
+	}
+	queueNotification(session, "turn/completed", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "completed",
+		},
+	})
+
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	setResp, err := agent.SetSessionConfigOption(context.Background(), acp.SetSessionConfigOptionRequest{
+		ValueId: &acp.SetSessionConfigOptionValueId{
+			SessionId: newResp.SessionId,
+			ConfigId:  acp.SessionConfigId(sessionConfigIDModel),
+			Value:     acp.SessionConfigValueId(testModelGPT55),
+		},
+	})
+	if err != nil {
+		t.Fatalf("SetSessionConfigOption() error = %v", err)
+	}
+	modelOption := requireModelOption(t, setResp.ConfigOptions)
+	if got := modelOption.CurrentValue; got != acp.SessionConfigValueId(testModelGPT55) {
+		t.Fatalf("model config current value = %q, want %q", got, testModelGPT55)
+	}
+	reasoningOption := requireReasoningEffortOption(t, setResp.ConfigOptions)
+	if got := reasoningOption.CurrentValue; got != acp.SessionConfigValueId("high") {
+		t.Fatalf("reasoning current value = %q, want high", got)
+	}
+
+	settingsUpdates := session.settingsUpdateParamsSnapshot()
+	if len(settingsUpdates) != 1 {
+		t.Fatalf("thread/settings/update calls = %d, want 1", len(settingsUpdates))
+	}
+	if got := stringValue(settingsUpdates[0], "model"); got != testModelGPT55 {
+		t.Fatalf("thread/settings/update model = %q, want %q", got, testModelGPT55)
+	}
+
+	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	}); err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+	turnStartParams := session.turnStartParamsSnapshot()
+	if len(turnStartParams) != 1 {
+		t.Fatalf("turn/start calls = %d, want 1", len(turnStartParams))
+	}
+	if got := stringValue(turnStartParams[0], "model"); got != testModelGPT55 {
+		t.Fatalf("turn/start model = %q, want %q", got, testModelGPT55)
 	}
 }
 
@@ -4184,6 +4286,32 @@ func requireReasoningEffortOption(t *testing.T, options []acp.SessionConfigOptio
 	}
 	t.Fatalf("reasoning effort option missing: %#v", options)
 	return nil
+}
+
+func requireModelOption(t *testing.T, options []acp.SessionConfigOption) *acp.SessionConfigOptionSelect {
+	t.Helper()
+	for _, option := range options {
+		if option.Select == nil {
+			continue
+		}
+		if option.Select.Id == acp.SessionConfigId(sessionConfigIDModel) {
+			return option.Select
+		}
+	}
+	t.Fatalf("model option missing: %#v", options)
+	return nil
+}
+
+func modelOptionsInclude(option *acp.SessionConfigOptionSelect, modelID string) bool {
+	if option == nil || option.Options.Ungrouped == nil {
+		return false
+	}
+	for _, candidate := range *option.Options.Ungrouped {
+		if candidate.Value == acp.SessionConfigValueId(modelID) {
+			return true
+		}
+	}
+	return false
 }
 
 func reasoningEffortOptionsInclude(option *acp.SessionConfigOptionSelect, effort string) bool {
