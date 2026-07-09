@@ -1652,7 +1652,7 @@ func TestPromptEmitsCompletedReasoningThoughtsWhenReasoningStreamingDisabled(t *
 		"item": map[string]any{
 			"type":    "reasoning",
 			"id":      "item-reasoning-1",
-			"summary": []any{"summary one", "summary two"},
+			"summary": []any{"First sentence.", "Second sentence. <!-- -->"},
 			"content": []any{"raw one"},
 		},
 	})
@@ -1686,22 +1686,17 @@ func TestPromptEmitsCompletedReasoningThoughtsWhenReasoningStreamingDisabled(t *
 	}
 
 	chunks := thoughtChunks(conn.sessionUpdates(newResp.SessionId))
-	if len(chunks) != 2 {
-		t.Fatalf("thought chunk count = %d, want 2: %#v", len(chunks), chunks)
+	if len(chunks) != 1 {
+		t.Fatalf("thought chunk count = %d, want 1: %#v", len(chunks), chunks)
 	}
-	if got := thoughtChunkText(chunks[0]); got != "summary one" {
-		t.Fatalf("first thought text = %q, want summary one", got)
+	if got := thoughtChunkText(chunks[0]); got != "First sentence. Second sentence." {
+		t.Fatalf("thought text = %q, want normalized aggregate", got)
 	}
-	if got := thoughtChunkText(chunks[1]); got != "summary two" {
-		t.Fatalf("second thought text = %q, want summary two", got)
+	if got := thoughtChunkMetaString(chunks[0], metaReasoningKindKey); got != reasoningKindSummary {
+		t.Fatalf("thought reasoning kind = %q, want %q", got, reasoningKindSummary)
 	}
-	for i, chunk := range chunks {
-		if got := thoughtChunkMetaString(chunk, metaReasoningKindKey); got != reasoningKindSummary {
-			t.Fatalf("thought %d reasoning kind = %q, want %q", i, got, reasoningKindSummary)
-		}
-		if got, ok := thoughtChunkMetaBool(chunk, metaCompletedKey); !ok || !got {
-			t.Fatalf("thought %d completed meta = (%t,%t), want (true,true)", i, got, ok)
-		}
+	if got, ok := thoughtChunkMetaBool(chunks[0], metaCompletedKey); !ok || !got {
+		t.Fatalf("thought completed meta = (%t,%t), want (true,true)", got, ok)
 	}
 	if countThoughtText(conn.sessionUpdates(newResp.SessionId), "raw one") != 0 {
 		t.Fatalf("unexpected raw reasoning content in default summary mode: %#v", chunks)

@@ -3002,15 +3002,22 @@ func reasoningItemTexts(item map[string]any, key string) []string {
 }
 
 func (a *codexACPProxyAgent) emitCompletedReasoningTexts(ctx context.Context, sessionID acp.SessionId, itemID string, kind string, texts []string) error {
-	for index, text := range texts {
-		if text == "" {
-			continue
-		}
-		if err := a.sendReasoningChunk(ctx, sessionID, text, itemID, kind, int64(index), true); err != nil {
-			return err
+	text := completedReasoningText(texts)
+	if text == "" {
+		return nil
+	}
+	return a.sendReasoningChunk(ctx, sessionID, text, itemID, kind, 0, true)
+}
+
+func completedReasoningText(texts []string) string {
+	parts := make([]string, 0, len(texts))
+	for _, text := range texts {
+		text = strings.TrimSpace(strings.ReplaceAll(text, "<!-- -->", ""))
+		if text != "" {
+			parts = append(parts, text)
 		}
 	}
-	return nil
+	return strings.Join(parts, " ")
 }
 
 func hasCompletedReasoningText(texts []string) bool {
