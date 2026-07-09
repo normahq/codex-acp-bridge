@@ -2,6 +2,7 @@ package codexacp
 
 import (
 	"context"
+	"crypto/sha1"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2920,13 +2921,22 @@ func reasoningThoughtChunkMeta(itemID string, kind string, index int64, complete
 }
 
 func reasoningThoughtChunkUpdate(text string, itemID string, kind string, index int64, completed bool) acp.SessionUpdate {
+	messageID := reasoningThoughtMessageID(itemID, kind, index)
 	return acp.SessionUpdate{
 		AgentThoughtChunk: &acp.SessionUpdateAgentThoughtChunk{
 			Meta:          reasoningThoughtChunkMeta(itemID, kind, index, completed),
 			Content:       acp.TextBlock(text),
+			MessageId:     &messageID,
 			SessionUpdate: "agent_thought_chunk",
 		},
 	}
+}
+
+func reasoningThoughtMessageID(itemID string, kind string, index int64) string {
+	sum := sha1.Sum([]byte(fmt.Sprintf("codex-acp-bridge:reasoning:%s:%s:%d", itemID, kind, index)))
+	sum[6] = (sum[6] & 0x0f) | 0x50
+	sum[8] = (sum[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", sum[0:4], sum[4:6], sum[6:8], sum[8:10], sum[10:16])
 }
 
 func (a *codexACPProxyAgent) sendReasoningChunk(ctx context.Context, sessionID acp.SessionId, text string, itemID string, kind string, index int64, completed bool) error {

@@ -1760,6 +1760,15 @@ func TestPromptEmitsCompletedReasoningBothLanesWhenReasoningStreamingDisabled(t 
 	if got := thoughtChunkMetaString(chunks[1], metaReasoningKindKey); got != reasoningKindContent {
 		t.Fatalf("second thought reasoning kind = %q, want %q", got, reasoningKindContent)
 	}
+	if !isUUIDString(thoughtChunkMessageID(chunks[0])) {
+		t.Fatalf("first thought messageId = %q, want UUID", thoughtChunkMessageID(chunks[0]))
+	}
+	if !isUUIDString(thoughtChunkMessageID(chunks[1])) {
+		t.Fatalf("second thought messageId = %q, want UUID", thoughtChunkMessageID(chunks[1]))
+	}
+	if thoughtChunkMessageID(chunks[0]) == thoughtChunkMessageID(chunks[1]) {
+		t.Fatalf("summary and content thought message IDs must differ: %q", thoughtChunkMessageID(chunks[0]))
+	}
 	for i, chunk := range chunks {
 		if got, ok := thoughtChunkMetaBool(chunk, metaCompletedKey); !ok || !got {
 			t.Fatalf("thought %d completed meta = (%t,%t), want (true,true)", i, got, ok)
@@ -1845,6 +1854,9 @@ func TestPromptStreamsReasoningSummaryThoughtsByDefault(t *testing.T) {
 	}
 	if got, ok := thoughtChunkMetaBool(chunks[1], metaCompletedKey); !ok || !got {
 		t.Fatalf("second thought completed meta = (%t,%t), want (true,true)", got, ok)
+	}
+	if thoughtChunkMessageID(chunks[0]) == "" || thoughtChunkMessageID(chunks[0]) != thoughtChunkMessageID(chunks[1]) {
+		t.Fatalf("streamed summary message IDs = (%q, %q), want matching non-empty IDs", thoughtChunkMessageID(chunks[0]), thoughtChunkMessageID(chunks[1]))
 	}
 	if countThoughtText(conn.sessionUpdates(newResp.SessionId), "raw") != 0 {
 		t.Fatalf("unexpected raw reasoning text in default summary mode: %#v", chunks)
@@ -4456,6 +4468,13 @@ func thoughtChunkText(chunk *acp.SessionUpdateAgentThoughtChunk) string {
 	return chunk.Content.Text.Text
 }
 
+func thoughtChunkMessageID(chunk *acp.SessionUpdateAgentThoughtChunk) string {
+	if chunk == nil || chunk.MessageId == nil {
+		return ""
+	}
+	return *chunk.MessageId
+}
+
 func thoughtChunkMetaString(chunk *acp.SessionUpdateAgentThoughtChunk, key string) string {
 	if chunk == nil || chunk.Meta == nil {
 		return ""
@@ -4481,6 +4500,25 @@ func thoughtChunkMetaBool(chunk *acp.SessionUpdateAgentThoughtChunk, key string)
 	}
 	b, ok := v.(bool)
 	return b, ok
+}
+
+func isUUIDString(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, r := range s {
+		switch i {
+		case 8, 13, 18, 23:
+			if r != '-' {
+				return false
+			}
+		default:
+			if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func latestUsageUpdate(updates []acp.SessionNotification) *acp.SessionUsageUpdate {
