@@ -73,6 +73,7 @@ type codexACPProxyAgent struct {
 	messageStreaming   bool
 	reasoningStreaming bool
 	reasoningThoughts  string
+	reasoningSummary   string
 
 	connMu sync.RWMutex
 	conn   codexACPConnection
@@ -112,15 +113,16 @@ type planItemState struct {
 }
 
 type codexProxySessionState struct {
-	cwd             string
-	config          codexAppConfig
-	threadID        string
-	turnID          string
-	model           string
-	mode            string
-	reasoningEffort string
-	mcpServers      map[string]acp.McpServer
-	mcpStartup      map[string]sessionMCPStartup
+	cwd              string
+	config           codexAppConfig
+	threadID         string
+	turnID           string
+	model            string
+	mode             string
+	reasoningEffort  string
+	reasoningSummary string
+	mcpServers       map[string]acp.McpServer
+	mcpStartup       map[string]sessionMCPStartup
 
 	backend appServerSession
 	cancel  context.CancelFunc
@@ -161,6 +163,7 @@ func newCodexACPProxyAgent(
 		logger:             logger,
 		reasoningStreaming: true,
 		reasoningThoughts:  defaultReasoningThoughts,
+		reasoningSummary:   defaultReasoningSummary,
 		sessions:           make(map[acp.SessionId]*codexProxySessionState),
 	}
 }
@@ -169,6 +172,7 @@ func (a *codexACPProxyAgent) setBridgeOptions(opts Options) {
 	a.messageStreaming = opts.MessageStreaming
 	a.reasoningStreaming = opts.reasoningStreamingEnabled()
 	a.reasoningThoughts = opts.reasoningThoughtsMode()
+	a.reasoningSummary = opts.reasoningSummaryMode()
 }
 
 func (a *codexACPProxyAgent) setConnection(conn codexACPConnection) {
@@ -330,6 +334,7 @@ func (a *codexACPProxyAgent) NewSession(ctx context.Context, params acp.NewSessi
 	if err != nil {
 		return acp.NewSessionResponse{}, err
 	}
+	sessionState.reasoningSummary = a.reasoningSummary
 	sessionID := acp.SessionId(sessionState.threadID)
 	if err := a.registerSessionState(sessionID, sessionState); err != nil {
 		a.closeSessionState(sessionState)
@@ -459,6 +464,7 @@ func (a *codexACPProxyAgent) restoreSession(
 	}
 
 	sessionState := newSessionStateFromThreadResume(cwd, sessionConfig, mcpServers, backend, resumeResp)
+	sessionState.reasoningSummary = a.reasoningSummary
 	if err := a.registerSessionState(sessionID, sessionState); err != nil {
 		a.closeSessionState(sessionState)
 		return sessionRestoreResponse{}, err
@@ -661,10 +667,14 @@ func (a *codexACPProxyAgent) Prompt(ctx context.Context, params acp.PromptReques
 	threadID := state.threadID
 	model := state.model
 	reasoningEffort := state.reasoningEffort
+	reasoningSummary := state.reasoningSummary
+	if strings.TrimSpace(reasoningSummary) == "" {
+		reasoningSummary = a.reasoningSummary
+	}
 	doneCh := state.done
 	a.mu.Unlock()
 
-	turnStartParams, err := buildTurnStartParams(threadID, params.Prompt, model, reasoningEffort)
+	turnStartParams, err := buildTurnStartParams(threadID, params.Prompt, model, reasoningEffort, reasoningSummary)
 	if err != nil {
 		return acp.PromptResponse{}, acp.NewInvalidParams(err.Error())
 	}
@@ -1065,6 +1075,10 @@ func (a *codexACPProxyAgent) setSessionModel(
 	threadID := state.threadID
 	previousModel := state.model
 	currentReasoningEffort := state.reasoningEffort
+	currentReasoningSummary := state.reasoningSummary
+	if strings.TrimSpace(currentReasoningSummary) == "" {
+		currentReasoningSummary = a.reasoningSummary
+	}
 	a.mu.Unlock()
 
 	if backend == nil {
@@ -1087,7 +1101,7 @@ func (a *codexACPProxyAgent) setSessionModel(
 	}
 	a.mu.Unlock()
 
-	if err := persistSessionSettingsUpdate(ctx, backend, threadID, selectedModelID, ""); err != nil {
+	if err := persistSessionSettingsUpdate(ctx, backend, threadID, selectedModelID, "", currentReasoningSummary); err != nil {
 		a.mu.Lock()
 		if state := a.sessions[sessionID]; state != nil && state.done == nil && state.model == selectedModelID {
 			state.model = previousModel
@@ -1120,6 +1134,10 @@ func (a *codexACPProxyAgent) setSessionReasoningEffort(
 	currentModelID := strings.TrimSpace(state.model)
 	threadID := state.threadID
 	previousEffort := state.reasoningEffort
+	currentReasoningSummary := state.reasoningSummary
+	if strings.TrimSpace(currentReasoningSummary) == "" {
+		currentReasoningSummary = a.reasoningSummary
+	}
 	a.mu.Unlock()
 	if backend == nil {
 		return nil, errors.New(errSessionBackendUnavailable)
@@ -1150,7 +1168,7 @@ func (a *codexACPProxyAgent) setSessionReasoningEffort(
 	}
 	a.mu.Unlock()
 
-	if err := persistSessionSettingsUpdate(ctx, backend, threadID, "", selectedEffort); err != nil {
+	if err := persistSessionSettingsUpdate(ctx, backend, threadID, "", selectedEffort, currentReasoningSummary); err != nil {
 		a.mu.Lock()
 		if state := a.sessions[sessionID]; state != nil && state.done == nil && state.reasoningEffort == selectedEffort {
 			state.reasoningEffort = previousEffort
@@ -1169,11 +1187,12 @@ func persistSessionSettingsUpdate(
 	threadID string,
 	model string,
 	reasoningEffort string,
+	reasoningSummary string,
 ) error {
 	if backend == nil || strings.TrimSpace(threadID) == "" {
 		return nil
 	}
-	if err := backend.ThreadSettingsUpdate(ctx, buildThreadSettingsUpdateParams(threadID, model, reasoningEffort)); err != nil {
+	if err := backend.ThreadSettingsUpdate(ctx, buildThreadSettingsUpdateParams(threadID, model, reasoningEffort, reasoningSummary)); err != nil {
 		return fmt.Errorf("thread/settings/update: %w", err)
 	}
 	return nil

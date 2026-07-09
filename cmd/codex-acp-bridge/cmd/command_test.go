@@ -67,7 +67,7 @@ func TestCommandExposesOnlyBridgeFlags(t *testing.T) {
 			t.Fatalf("flag %q unexpectedly present", removedFlag)
 		}
 	}
-	for _, expectedFlag := range []string{"name", "message-streaming", "reasoning-streaming", "reasoning-thoughts", "debug"} {
+	for _, expectedFlag := range []string{"name", "message-streaming", "reasoning-streaming", "reasoning-thoughts", "reasoning-summary", "debug"} {
 		if got := cmd.Flags().Lookup(expectedFlag); got == nil {
 			t.Fatalf("flag %q missing", expectedFlag)
 		}
@@ -147,7 +147,7 @@ func TestCommandPassesReasoningFlagsToRunProxy(t *testing.T) {
 	}
 
 	cmd := Command()
-	cmd.SetArgs([]string{"--reasoning-thoughts=both", "--reasoning-streaming=false"})
+	cmd.SetArgs([]string{"--reasoning-thoughts=both", "--reasoning-summary=detailed", "--reasoning-streaming=false"})
 	cmd.SetIn(strings.NewReader(""))
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
@@ -157,6 +157,9 @@ func TestCommandPassesReasoningFlagsToRunProxy(t *testing.T) {
 	}
 	if gotOpts.ReasoningThoughts != "both" {
 		t.Fatalf("ReasoningThoughts = %q, want both", gotOpts.ReasoningThoughts)
+	}
+	if gotOpts.ReasoningSummary != "detailed" {
+		t.Fatalf("ReasoningSummary = %q, want detailed", gotOpts.ReasoningSummary)
 	}
 	if gotOpts.ReasoningStreaming {
 		t.Fatal("ReasoningStreaming = true, want false")

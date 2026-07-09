@@ -51,7 +51,7 @@ func buildThreadResumeParams(
 	return params
 }
 
-func buildThreadSettingsUpdateParams(threadID string, model string, reasoningEffort string) map[string]any {
+func buildThreadSettingsUpdateParams(threadID string, model string, reasoningEffort string, reasoningSummary string) map[string]any {
 	params := map[string]any{
 		"threadId": strings.TrimSpace(threadID),
 	}
@@ -60,6 +60,9 @@ func buildThreadSettingsUpdateParams(threadID string, model string, reasoningEff
 	}
 	if trimmedReasoningEffort := strings.TrimSpace(reasoningEffort); trimmedReasoningEffort != "" {
 		params["effort"] = trimmedReasoningEffort
+	}
+	if trimmedReasoningSummary := strings.TrimSpace(reasoningSummary); trimmedReasoningSummary != "" {
+		params["summary"] = trimmedReasoningSummary
 	}
 	return params
 }
@@ -147,7 +150,13 @@ func buildThreadSessionParamsBase(
 	return params
 }
 
-func buildTurnStartParams(threadID string, prompt []acp.ContentBlock, model string, reasoningEffort string) (map[string]any, error) {
+func buildTurnStartParams(
+	threadID string,
+	prompt []acp.ContentBlock,
+	model string,
+	reasoningEffort string,
+	reasoningSummary string,
+) (map[string]any, error) {
 	inputItems, err := buildTurnInputItems(prompt)
 	if err != nil {
 		return nil, err
@@ -165,6 +174,9 @@ func buildTurnStartParams(threadID string, prompt []acp.ContentBlock, model stri
 	}
 	if trimmedReasoningEffort := strings.TrimSpace(reasoningEffort); trimmedReasoningEffort != "" {
 		params["effort"] = trimmedReasoningEffort
+	}
+	if trimmedReasoningSummary := strings.TrimSpace(reasoningSummary); trimmedReasoningSummary != "" {
+		params["summary"] = trimmedReasoningSummary
 	}
 	return params, nil
 }

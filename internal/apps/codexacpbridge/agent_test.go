@@ -1007,6 +1007,9 @@ func TestSetSessionConfigOptionReasoningEffortAppliesToNextTurn(t *testing.T) {
 	if got := stringValue(settingsUpdates[0], "effort"); got != testReasoningXHigh {
 		t.Fatalf("thread/settings/update effort = %q, want %q", got, testReasoningXHigh)
 	}
+	if got := stringValue(settingsUpdates[0], "summary"); got != reasoningSummaryAuto {
+		t.Fatalf("thread/settings/update summary = %q, want %q", got, reasoningSummaryAuto)
+	}
 
 	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
 		SessionId: newResp.SessionId,
@@ -1020,6 +1023,9 @@ func TestSetSessionConfigOptionReasoningEffortAppliesToNextTurn(t *testing.T) {
 	}
 	if got := stringValue(turnStartParams[0], "effort"); got != testReasoningXHigh {
 		t.Fatalf("turn/start effort = %q, want xhigh", got)
+	}
+	if got := stringValue(turnStartParams[0], "summary"); got != reasoningSummaryAuto {
+		t.Fatalf("turn/start summary = %q, want %q", got, reasoningSummaryAuto)
 	}
 }
 
@@ -1091,6 +1097,9 @@ func TestSetSessionConfigOptionModelAppliesToNextTurn(t *testing.T) {
 	if got := stringValue(settingsUpdates[0], "model"); got != testModelGPT55 {
 		t.Fatalf("thread/settings/update model = %q, want %q", got, testModelGPT55)
 	}
+	if got := stringValue(settingsUpdates[0], "summary"); got != reasoningSummaryAuto {
+		t.Fatalf("thread/settings/update summary = %q, want %q", got, reasoningSummaryAuto)
+	}
 
 	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
 		SessionId: newResp.SessionId,
@@ -1104,6 +1113,9 @@ func TestSetSessionConfigOptionModelAppliesToNextTurn(t *testing.T) {
 	}
 	if got := stringValue(turnStartParams[0], "model"); got != testModelGPT55 {
 		t.Fatalf("turn/start model = %q, want %q", got, testModelGPT55)
+	}
+	if got := stringValue(turnStartParams[0], "summary"); got != reasoningSummaryAuto {
+		t.Fatalf("turn/start summary = %q, want %q", got, reasoningSummaryAuto)
 	}
 }
 

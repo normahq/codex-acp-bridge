@@ -46,7 +46,7 @@ This document does not require backend source internals; it documents observable
 
 The adapter should project Codex backend events into ACP session semantics as follows.
 
-`session/update.agent_thought_chunk` is reserved for reasoning output only. The bridge can project the readable `summary` lane, the raw `content` lane, or both, and preserves that distinction in `_meta`. When `--reasoning-streaming=true`, selected lanes stream from reasoning delta notifications. If `summary` mode receives no summary text for a completed reasoning item, the bridge emits completed raw content as a fallback thought. When `--reasoning-streaming=false`, reasoning produces no ACP thought output. `--reasoning-thoughts=off` also disables thought output entirely.
+`session/update.agent_thought_chunk` is reserved for reasoning output only. The bridge requests app-server summaries with `turn/start.summary` from `--reasoning-summary` (`auto` by default), then can project the readable `summary` lane, the raw `content` lane, or both, and preserves that distinction in `_meta`. When `--reasoning-streaming=true`, selected lanes stream from reasoning delta notifications. If `summary` mode receives no summary text for a completed reasoning item, the bridge emits completed raw content as a fallback thought. When `--reasoning-streaming=false`, reasoning produces no ACP thought output. `--reasoning-thoughts=off` also disables thought output entirely.
 
 ### Initialize negotiation
 
@@ -59,6 +59,10 @@ Notification opt-outs depend on bridge flags:
 - `--reasoning-thoughts=summary` -> additionally opt out `item/reasoning/textDelta`
 - `--reasoning-thoughts=content` -> additionally opt out `item/reasoning/summaryTextDelta`, `item/reasoning/summaryPartAdded`
 - `--reasoning-thoughts=off` -> opt out all reasoning delta notifications regardless of `--reasoning-streaming`
+
+Reasoning summary request:
+- `--reasoning-summary=auto|concise|detailed|none` -> send matching `summary` in `turn/start`
+- Existing threads also receive the same `summary` in `thread/settings/update` when model or reasoning effort is persisted
 
 ### Core notification mapping
 

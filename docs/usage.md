@@ -65,6 +65,9 @@ acp-repl -- codex-acp-bridge
 - `--reasoning-streaming`:
   Stream app-server reasoning deltas live when enabled. When disabled, suppress ACP thought output from reasoning entirely.
   Default: `true`.
+- `--reasoning-summary`:
+  Request app-server reasoning summaries: `auto`, `concise`, `detailed`, or `none`.
+  Default: `auto`. This controls the `summary` field sent to `turn/start` and persisted with `thread/settings/update`; it does not select which lane is projected into ACP.
 - `--reasoning-thoughts`:
   Select which reasoning lane is projected as ACP thoughts: `off`, `summary`, `content`, or `both`.
   Default: `summary`. If app-server completes a reasoning item with no summary text but with raw content, summary mode emits that completed content as a fallback thought.
@@ -82,6 +85,7 @@ acp-repl -- codex-acp-bridge
   - `--reasoning-thoughts=summary` opts out raw `item/reasoning/textDelta`.
   - `--reasoning-thoughts=content` opts out `item/reasoning/summaryTextDelta` and `item/reasoning/summaryPartAdded`.
   - `--reasoning-thoughts=off` opts out all reasoning delta notifications.
+- Sends `turn/start.summary` using `--reasoning-summary` for each prompt. When a thread already exists and model or reasoning effort changes, persists the same summary mode through `thread/settings/update.summary`.
 - Opens ACP agent-side stdio connection for clients.
 - Creates one backend session per ACP session.
 - `session/new` returns the app-server thread id (`thread.id`) as the ACP `sessionId`.

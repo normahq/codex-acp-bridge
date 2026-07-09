@@ -15,7 +15,7 @@ func TestBuildTurnStartParamsImageDataURLFallback(t *testing.T) {
 				Data:     "QUJDRA==",
 			},
 		},
-	}, "gpt-5.4", testReasoningXHigh)
+	}, "gpt-5.4", testReasoningXHigh, reasoningSummaryDetailed)
 	if err != nil {
 		t.Fatalf("buildTurnStartParams() error = %v", err)
 	}
@@ -28,6 +28,9 @@ func TestBuildTurnStartParamsImageDataURLFallback(t *testing.T) {
 	}
 	if got := stringValue(params, "effort"); got != testReasoningXHigh {
 		t.Fatalf("effort = %q, want %q", got, testReasoningXHigh)
+	}
+	if got := stringValue(params, "summary"); got != reasoningSummaryDetailed {
+		t.Fatalf("summary = %q, want %q", got, reasoningSummaryDetailed)
 	}
 	input := listValue(params, "input")
 	if len(input) != 1 {
@@ -50,7 +53,7 @@ func TestBuildTurnStartParamsRejectsUnsupportedResourceLink(t *testing.T) {
 				Uri:  "file:///tmp/repo",
 			},
 		},
-	}, "", "")
+	}, "", "", "")
 	if err == nil {
 		t.Fatal("buildTurnStartParams() error = nil, want unsupported resource_link error")
 	}
@@ -90,7 +93,7 @@ func TestBuildThreadResumeParamsIncludesThreadAndOverrides(t *testing.T) {
 }
 
 func TestBuildThreadSettingsUpdateParams(t *testing.T) {
-	params := buildThreadSettingsUpdateParams("thr-9", testModelGPT54, testReasoningXHigh)
+	params := buildThreadSettingsUpdateParams("thr-9", testModelGPT54, testReasoningXHigh, reasoningSummaryDetailed)
 	if got := stringValue(params, "threadId"); got != "thr-9" {
 		t.Fatalf("threadId = %q, want %q", got, "thr-9")
 	}
@@ -99,6 +102,9 @@ func TestBuildThreadSettingsUpdateParams(t *testing.T) {
 	}
 	if got := stringValue(params, "effort"); got != testReasoningXHigh {
 		t.Fatalf("effort = %q, want %q", got, testReasoningXHigh)
+	}
+	if got := stringValue(params, "summary"); got != reasoningSummaryDetailed {
+		t.Fatalf("summary = %q, want %q", got, reasoningSummaryDetailed)
 	}
 }
 

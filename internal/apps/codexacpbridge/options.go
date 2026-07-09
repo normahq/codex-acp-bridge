@@ -36,6 +36,12 @@ var (
 		reasoningThoughtsContent: {},
 		reasoningThoughtsBoth:    {},
 	}
+	validReasoningSummaries = map[string]struct{}{
+		reasoningSummaryAuto:     {},
+		reasoningSummaryConcise:  {},
+		reasoningSummaryDetailed: {},
+		reasoningSummaryNone:     {},
+	}
 )
 
 const (
@@ -44,6 +50,11 @@ const (
 	reasoningThoughtsContent = "content"
 	reasoningThoughtsBoth    = "both"
 	defaultReasoningThoughts = reasoningThoughtsSummary
+	reasoningSummaryAuto     = "auto"
+	reasoningSummaryConcise  = "concise"
+	reasoningSummaryDetailed = "detailed"
+	reasoningSummaryNone     = "none"
+	defaultReasoningSummary  = reasoningSummaryAuto
 )
 
 // Options configures Codex bridge backend -> ACP proxy behavior.
@@ -52,6 +63,7 @@ type Options struct {
 	MessageStreaming   bool
 	ReasoningStreaming bool
 	ReasoningThoughts  string
+	ReasoningSummary   string
 
 	reasoningStreamingConfigured bool
 }
@@ -140,8 +152,19 @@ func (o Options) reasoningThoughtsIncludeContent() bool {
 	}
 }
 
+func (o Options) reasoningSummaryMode() string {
+	mode := strings.TrimSpace(o.ReasoningSummary)
+	if mode == "" {
+		return defaultReasoningSummary
+	}
+	return mode
+}
+
 func (o Options) validate() error {
 	if err := validateEnumValue("reasoning thoughts", o.reasoningThoughtsMode(), validReasoningThoughtModes); err != nil {
+		return err
+	}
+	if err := validateEnumValue("reasoning summary", o.reasoningSummaryMode(), validReasoningSummaries); err != nil {
 		return err
 	}
 	return nil
