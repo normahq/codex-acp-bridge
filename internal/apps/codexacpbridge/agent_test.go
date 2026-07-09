@@ -1776,6 +1776,120 @@ func TestPromptEmitsCompletedReasoningBothLanesWhenReasoningStreamingDisabled(t 
 	}
 }
 
+func TestPromptEmitsCompletedReasoningContentWhenReasoningStreamingDisabled(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	queueNotification(session, "item/completed", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"item": map[string]any{
+			"type":    "reasoning",
+			"id":      "item-reasoning-1",
+			"summary": []any{"summary"},
+			"content": []any{"raw one", "raw two"},
+		},
+	})
+	queueNotification(session, "turn/completed", map[string]any{
+		"threadId": "thr-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "completed",
+		},
+	})
+
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+	opts := Options{ReasoningThoughts: "content"}
+	opts.SetReasoningStreaming(false)
+	agent.setBridgeOptions(opts)
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	}); err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+
+	chunks := thoughtChunks(conn.sessionUpdates(newResp.SessionId))
+	if len(chunks) != 1 {
+		t.Fatalf("thought chunk count = %d, want 1: %#v", len(chunks), chunks)
+	}
+	if got := thoughtChunkText(chunks[0]); got != "raw one raw two" {
+		t.Fatalf("thought text = %q, want aggregated content", got)
+	}
+	if got := thoughtChunkMetaString(chunks[0], metaReasoningKindKey); got != reasoningKindContent {
+		t.Fatalf("thought reasoning kind = %q, want %q", got, reasoningKindContent)
+	}
+	if countThoughtText(conn.sessionUpdates(newResp.SessionId), "summary") != 0 {
+		t.Fatalf("unexpected summary reasoning text in content mode: %#v", chunks)
+	}
+}
+
+func TestPromptSuppressesReasoningThoughtsWhenConfiguredOff(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	queueNotification(session, "item/reasoning/summaryTextDelta", map[string]any{
+		"threadId":     "thr-1",
+		"turnId":       "turn-1",
+		"itemId":       "item-reasoning-1",
+		"summaryIndex": 0,
+		"delta":        "summary",
+	})
+	queueNotification(session, "item/reasoning/textDelta", map[string]any{
+		"threadId":     "thr-1",
+		"turnId":       "turn-1",
+		"itemId":       "item-reasoning-1",
+		"contentIndex": 0,
+		"delta":        "raw",
+	})
+	queueNotification(session, "item/completed", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"item": map[string]any{
+			"type":    "reasoning",
+			"id":      "item-reasoning-1",
+			"summary": []any{"completed summary"},
+			"content": []any{"completed raw"},
+		},
+	})
+	queueNotification(session, "turn/completed", map[string]any{
+		"threadId": "thr-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "completed",
+		},
+	})
+
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+	agent.setBridgeOptions(Options{ReasoningThoughts: "off"})
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	}); err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+
+	if chunks := thoughtChunks(conn.sessionUpdates(newResp.SessionId)); len(chunks) != 0 {
+		t.Fatalf("thought chunk count = %d, want 0: %#v", len(chunks), chunks)
+	}
+}
+
 func TestPromptStreamsReasoningSummaryThoughtsByDefault(t *testing.T) {
 	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
 	queueNotification(session, "item/started", map[string]any{
