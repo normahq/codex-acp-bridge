@@ -1740,6 +1740,67 @@ func TestPromptStreamsReasoningSummaryThoughtsByDefault(t *testing.T) {
 	}
 }
 
+func TestPromptFallsBackToCompletedReasoningContentInSummaryMode(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	queueNotification(session, "item/started", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"item": map[string]any{
+			"type": "reasoning",
+			"id":   "item-reasoning-1",
+		},
+	})
+	queueNotification(session, "item/completed", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"item": map[string]any{
+			"type":    "reasoning",
+			"id":      "item-reasoning-1",
+			"summary": []any{},
+			"content": []any{"raw fallback"},
+		},
+	})
+	queueNotification(session, "turn/completed", map[string]any{
+		"threadId": "thr-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "completed",
+		},
+	})
+
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	}); err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+
+	chunks := thoughtChunks(conn.sessionUpdates(newResp.SessionId))
+	if len(chunks) != 1 {
+		t.Fatalf("thought chunk count = %d, want 1: %#v", len(chunks), chunks)
+	}
+	if got := thoughtChunkText(chunks[0]); got != "raw fallback" {
+		t.Fatalf("thought text = %q, want raw fallback", got)
+	}
+	if got := thoughtChunkMetaString(chunks[0], metaReasoningKindKey); got != reasoningKindContent {
+		t.Fatalf("thought reasoning kind = %q, want %q", got, reasoningKindContent)
+	}
+	if got, ok := thoughtChunkMetaBool(chunks[0], metaCompletedKey); !ok || !got {
+		t.Fatalf("thought completed meta = (%t,%t), want (true,true)", got, ok)
+	}
+}
+
 func TestPromptStreamsReasoningContentThoughtsWhenConfigured(t *testing.T) {
 	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
 	queueNotification(session, "item/started", map[string]any{

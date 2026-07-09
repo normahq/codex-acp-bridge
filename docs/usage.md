@@ -67,7 +67,7 @@ acp-repl -- codex-acp-bridge
   Default: `true`.
 - `--reasoning-thoughts`:
   Select which reasoning lane is projected as ACP thoughts: `off`, `summary`, `content`, or `both`.
-  Default: `summary`.
+  Default: `summary`. If app-server completes a reasoning item with no summary text but with raw content, summary mode emits that completed content as a fallback thought.
 - `--debug`:
   Enable debug logging for the bridge process.
 

@@ -46,7 +46,7 @@ This document does not require backend source internals; it documents observable
 
 The adapter should project Codex backend events into ACP session semantics as follows.
 
-`session/update.agent_thought_chunk` is reserved for reasoning output only. The bridge can project the readable `summary` lane, the raw `content` lane, or both, and preserves that distinction in `_meta`. When `--reasoning-streaming=true`, selected lanes stream from reasoning delta notifications. When `--reasoning-streaming=false`, reasoning produces no ACP thought output. `--reasoning-thoughts=off` also disables thought output entirely.
+`session/update.agent_thought_chunk` is reserved for reasoning output only. The bridge can project the readable `summary` lane, the raw `content` lane, or both, and preserves that distinction in `_meta`. When `--reasoning-streaming=true`, selected lanes stream from reasoning delta notifications. If `summary` mode receives no summary text for a completed reasoning item, the bridge emits completed raw content as a fallback thought. When `--reasoning-streaming=false`, reasoning produces no ACP thought output. `--reasoning-thoughts=off` also disables thought output entirely.
 
 ### Initialize negotiation
 

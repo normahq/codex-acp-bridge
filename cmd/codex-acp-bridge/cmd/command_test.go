@@ -127,3 +127,38 @@ func TestCommandPassesExecuteContextToRunProxy(t *testing.T) {
 		t.Fatalf("runProxy context value = %q, want %q", gotValue, "propagated")
 	}
 }
+
+func TestCommandPassesReasoningFlagsToRunProxy(t *testing.T) {
+	origRunProxy := runProxy
+	origInitLogging := initLogging
+	t.Cleanup(func() {
+		runProxy = origRunProxy
+		initLogging = origInitLogging
+	})
+
+	initLogging = func(...logging.OptOptionsSetter) error {
+		return nil
+	}
+
+	var gotOpts codexacpbridge.Options
+	runProxy = func(_ context.Context, _ string, opts codexacpbridge.Options, _ io.Reader, _, _ io.Writer) error {
+		gotOpts = opts
+		return nil
+	}
+
+	cmd := Command()
+	cmd.SetArgs([]string{"--reasoning-thoughts=both", "--reasoning-streaming=false"})
+	cmd.SetIn(strings.NewReader(""))
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if gotOpts.ReasoningThoughts != "both" {
+		t.Fatalf("ReasoningThoughts = %q, want both", gotOpts.ReasoningThoughts)
+	}
+	if gotOpts.ReasoningStreaming {
+		t.Fatal("ReasoningStreaming = true, want false")
+	}
+}

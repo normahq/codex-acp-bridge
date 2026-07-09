@@ -2933,6 +2933,15 @@ func (a *codexACPProxyAgent) emitCompletedReasoningTexts(ctx context.Context, se
 	return nil
 }
 
+func hasCompletedReasoningText(texts []string) bool {
+	for _, text := range texts {
+		if text != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *codexACPProxyAgent) handleCompletedReasoning(ctx context.Context, sessionID acp.SessionId, item map[string]any) error {
 	itemID := stringValue(item, "id")
 	if itemID == "" {
@@ -2951,7 +2960,13 @@ func (a *codexACPProxyAgent) handleCompletedReasoning(ctx context.Context, sessi
 					return err
 				}
 			} else if !state.summary.streamed {
-				if err := a.emitCompletedReasoningTexts(ctx, sessionID, itemID, reasoningKindSummary, summaryTexts); err != nil {
+				kind := reasoningKindSummary
+				texts := summaryTexts
+				if !hasCompletedReasoningText(texts) && !a.reasoningThoughtsIncludeContent() {
+					kind = reasoningKindContent
+					texts = contentTexts
+				}
+				if err := a.emitCompletedReasoningTexts(ctx, sessionID, itemID, kind, texts); err != nil {
 					return err
 				}
 			}
