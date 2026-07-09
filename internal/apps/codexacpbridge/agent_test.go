@@ -1890,6 +1890,45 @@ func TestPromptSuppressesReasoningThoughtsWhenConfiguredOff(t *testing.T) {
 	}
 }
 
+func TestReasoningThoughtChunkUpdateCarriesStableMessageAndItemIDs(t *testing.T) {
+	first := reasoningThoughtChunkUpdate("first", "item-reasoning-1", reasoningKindSummary, 0, false).AgentThoughtChunk
+	again := reasoningThoughtChunkUpdate("again", "item-reasoning-1", reasoningKindSummary, 0, true).AgentThoughtChunk
+	content := reasoningThoughtChunkUpdate("content", "item-reasoning-1", reasoningKindContent, 0, false).AgentThoughtChunk
+	nextSummary := reasoningThoughtChunkUpdate("next", "item-reasoning-1", reasoningKindSummary, 1, false).AgentThoughtChunk
+	otherItem := reasoningThoughtChunkUpdate("other", "item-reasoning-2", reasoningKindSummary, 0, false).AgentThoughtChunk
+
+	if got := thoughtChunkMetaString(first, metaItemIDKey); got != "item-reasoning-1" {
+		t.Fatalf("thought itemId meta = %q, want item-reasoning-1", got)
+	}
+	if got := thoughtChunkMetaString(first, metaReasoningKindKey); got != reasoningKindSummary {
+		t.Fatalf("thought reasoning kind meta = %q, want %q", got, reasoningKindSummary)
+	}
+	if got := thoughtChunkMetaInt64(first, metaSummaryIndexKey); got != 0 {
+		t.Fatalf("thought summary index meta = %d, want 0", got)
+	}
+	if got, ok := thoughtChunkMetaBool(first, metaCompletedKey); !ok || got {
+		t.Fatalf("thought completed meta = (%t,%t), want (false,true)", got, ok)
+	}
+	if got, ok := thoughtChunkMetaBool(again, metaCompletedKey); !ok || !got {
+		t.Fatalf("completed thought meta = (%t,%t), want (true,true)", got, ok)
+	}
+	if !isUUIDString(thoughtChunkMessageID(first)) {
+		t.Fatalf("thought messageId = %q, want UUID", thoughtChunkMessageID(first))
+	}
+	if thoughtChunkMessageID(first) != thoughtChunkMessageID(again) {
+		t.Fatalf("same item/kind/index messageIds differ: %q vs %q", thoughtChunkMessageID(first), thoughtChunkMessageID(again))
+	}
+	for name, chunk := range map[string]*acp.SessionUpdateAgentThoughtChunk{
+		"content":      content,
+		"next summary": nextSummary,
+		"other item":   otherItem,
+	} {
+		if thoughtChunkMessageID(first) == thoughtChunkMessageID(chunk) {
+			t.Fatalf("%s messageId = %q, must differ from summary item/index messageId", name, thoughtChunkMessageID(chunk))
+		}
+	}
+}
+
 func TestPromptStreamsReasoningSummaryThoughtsByDefault(t *testing.T) {
 	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
 	queueNotification(session, "item/started", map[string]any{
@@ -4614,6 +4653,26 @@ func thoughtChunkMetaBool(chunk *acp.SessionUpdateAgentThoughtChunk, key string)
 	}
 	b, ok := v.(bool)
 	return b, ok
+}
+
+func thoughtChunkMetaInt64(chunk *acp.SessionUpdateAgentThoughtChunk, key string) int64 {
+	if chunk == nil || chunk.Meta == nil {
+		return 0
+	}
+	v, ok := chunk.Meta[key]
+	if !ok || v == nil {
+		return 0
+	}
+	switch n := v.(type) {
+	case int:
+		return int64(n)
+	case int64:
+		return n
+	case float64:
+		return int64(n)
+	default:
+		return 0
+	}
 }
 
 func isUUIDString(s string) bool {
