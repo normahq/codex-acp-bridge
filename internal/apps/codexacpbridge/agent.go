@@ -102,11 +102,13 @@ type reasoningLaneState struct {
 	open     bool
 	streamed bool
 	hasText  bool
+	text     string
 }
 
 type reasoningItemState struct {
-	summary reasoningLaneState
-	content reasoningLaneState
+	summary          reasoningLaneState
+	content          reasoningLaneState
+	summaryPublished bool
 }
 
 type planItemState struct {
@@ -1575,15 +1577,22 @@ func (a *codexACPProxyAgent) handleNotification(
 		if err := a.sendAgentMessageDelta(ctx, sessionID, itemID, delta); err != nil {
 			return false, "", nil, nil, err
 		}
-	case methodReasoningTextDelta, methodReasoningSummaryTextDelta:
-		if !a.reasoningStreaming || !a.reasoningThoughtsEnabled() {
+	case methodReasoningTextDelta:
+		if !a.reasoningStreaming || !a.reasoningThoughtsIncludeContent() {
+			return false, "", nil, nil, nil
+		}
+		if err := a.handleReasoningDelta(ctx, sessionID, note.Method, params); err != nil {
+			return false, "", nil, nil, err
+		}
+	case methodReasoningSummaryTextDelta:
+		if !a.reasoningThoughtsIncludeSummary() {
 			return false, "", nil, nil, nil
 		}
 		if err := a.handleReasoningDelta(ctx, sessionID, note.Method, params); err != nil {
 			return false, "", nil, nil, err
 		}
 	case methodReasoningSummaryPartAdded:
-		if !a.reasoningStreaming || !a.reasoningThoughtsIncludeSummary() {
+		if !a.reasoningThoughtsIncludeSummary() {
 			return false, "", nil, nil, nil
 		}
 		if err := a.handleReasoningSummaryPartAdded(ctx, sessionID, params); err != nil {
@@ -2849,12 +2858,12 @@ func (a *codexACPProxyAgent) completeAgentMessageState(sessionID acp.SessionId, 
 	return itemState
 }
 
-func (a *codexACPProxyAgent) advanceReasoningLane(sessionID acp.SessionId, itemID string, kind string, index int64, streamed bool) (int64, bool) {
+func (a *codexACPProxyAgent) advanceReasoningLane(sessionID acp.SessionId, itemID string, kind string, index int64, streamed bool) (int64, string, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	state := a.sessions[sessionID]
 	if state == nil {
-		return 0, false
+		return 0, "", false
 	}
 	if state.reasoningItems == nil {
 		state.reasoningItems = make(map[string]reasoningItemState)
@@ -2867,14 +2876,16 @@ func (a *codexACPProxyAgent) advanceReasoningLane(sessionID acp.SessionId, itemI
 	case reasoningKindContent:
 		lane = itemState.content
 	default:
-		return 0, false
+		return 0, "", false
 	}
 	previousIndex := lane.index
+	previousText := lane.text
 	shouldClose := lane.open && lane.index != index && lane.hasText
 	if !lane.open || lane.index != index {
 		lane.index = index
 		lane.open = true
 		lane.hasText = false
+		lane.text = ""
 	}
 	if streamed {
 		lane.streamed = true
@@ -2887,7 +2898,56 @@ func (a *codexACPProxyAgent) advanceReasoningLane(sessionID acp.SessionId, itemI
 		itemState.content = lane
 	}
 	state.reasoningItems[itemID] = itemState
-	return previousIndex, shouldClose
+	return previousIndex, previousText, shouldClose
+}
+
+func (a *codexACPProxyAgent) appendReasoningLaneText(sessionID acp.SessionId, itemID string, kind string, index int64, delta string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	state := a.sessions[sessionID]
+	if state == nil {
+		return
+	}
+	if state.reasoningItems == nil {
+		state.reasoningItems = make(map[string]reasoningItemState)
+	}
+	itemState := state.reasoningItems[itemID]
+	var lane reasoningLaneState
+	switch kind {
+	case reasoningKindSummary:
+		lane = itemState.summary
+	case reasoningKindContent:
+		lane = itemState.content
+	default:
+		return
+	}
+	if !lane.open || lane.index != index {
+		lane.index = index
+		lane.open = true
+		lane.hasText = false
+		lane.text = ""
+	}
+	lane.text += delta
+	lane.hasText = lane.hasText || delta != ""
+	switch kind {
+	case reasoningKindSummary:
+		itemState.summary = lane
+	case reasoningKindContent:
+		itemState.content = lane
+	}
+	state.reasoningItems[itemID] = itemState
+}
+
+func (a *codexACPProxyAgent) markReasoningSummaryPublished(sessionID acp.SessionId, itemID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	state := a.sessions[sessionID]
+	if state == nil || state.reasoningItems == nil {
+		return
+	}
+	itemState := state.reasoningItems[itemID]
+	itemState.summaryPublished = true
+	state.reasoningItems[itemID] = itemState
 }
 
 func (a *codexACPProxyAgent) completeReasoningState(sessionID acp.SessionId, itemID string) reasoningItemState {
@@ -2973,7 +3033,11 @@ func (a *codexACPProxyAgent) handleReasoningDelta(ctx context.Context, sessionID
 	if !ok {
 		return nil
 	}
-	previousIndex, shouldClose := a.advanceReasoningLane(sessionID, itemID, kind, index, true)
+	if !a.reasoningStreaming {
+		a.appendReasoningLaneText(sessionID, itemID, kind, index, delta)
+		return nil
+	}
+	previousIndex, _, shouldClose := a.advanceReasoningLane(sessionID, itemID, kind, index, true)
 	if shouldClose {
 		if err := a.sendReasoningChunk(ctx, sessionID, "", itemID, kind, previousIndex, true); err != nil {
 			return err
@@ -2988,8 +3052,19 @@ func (a *codexACPProxyAgent) handleReasoningSummaryPartAdded(ctx context.Context
 	if itemID == "" || !ok {
 		return nil
 	}
-	previousIndex, shouldClose := a.advanceReasoningLane(sessionID, itemID, reasoningKindSummary, index, false)
+	previousIndex, previousText, shouldClose := a.advanceReasoningLane(sessionID, itemID, reasoningKindSummary, index, false)
 	if !shouldClose {
+		return nil
+	}
+	if !a.reasoningStreaming {
+		text := completedReasoningText([]string{previousText})
+		if text == "" {
+			return nil
+		}
+		if err := a.sendReasoningChunk(ctx, sessionID, text, itemID, reasoningKindSummary, previousIndex, true); err != nil {
+			return err
+		}
+		a.markReasoningSummaryPublished(sessionID, itemID)
 		return nil
 	}
 	return a.sendReasoningChunk(ctx, sessionID, "", itemID, reasoningKindSummary, previousIndex, true)
@@ -3082,14 +3157,22 @@ func (a *codexACPProxyAgent) handleCompletedReasoning(ctx context.Context, sessi
 		return nil
 	}
 	if a.reasoningThoughtsIncludeSummary() {
-		kind := reasoningKindSummary
-		texts := summaryTexts
-		if !hasCompletedReasoningText(texts) && !a.reasoningThoughtsIncludeContent() {
-			kind = reasoningKindContent
-			texts = contentTexts
-		}
-		if err := a.emitCompletedReasoningTexts(ctx, sessionID, itemID, kind, texts); err != nil {
-			return err
+		if state.summaryPublished {
+			if text := completedReasoningText([]string{state.summary.text}); text != "" {
+				if err := a.sendReasoningChunk(ctx, sessionID, text, itemID, reasoningKindSummary, state.summary.index, true); err != nil {
+					return err
+				}
+			}
+		} else {
+			kind := reasoningKindSummary
+			texts := summaryTexts
+			if !hasCompletedReasoningText(texts) && !a.reasoningThoughtsIncludeContent() {
+				kind = reasoningKindContent
+				texts = contentTexts
+			}
+			if err := a.emitCompletedReasoningTexts(ctx, sessionID, itemID, kind, texts); err != nil {
+				return err
+			}
 		}
 	}
 	if a.reasoningThoughtsIncludeContent() {

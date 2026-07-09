@@ -76,7 +76,7 @@ Common flags:
 
 - `--name`: ACP agent name reported in `initialize.agentInfo.name`. Default: `norma-codex-acp-bridge`.
 - `--message-streaming`: stream Codex `agentMessage` deltas as ACP `agent_message_chunk` updates. Default: `false`.
-- `--reasoning-streaming`: stream Codex reasoning deltas live; when disabled, emit completed reasoning items as aggregated thoughts. Default: `true`.
+- `--reasoning-streaming`: stream Codex reasoning text deltas live; when disabled, raw/content token deltas stay off, while summary thoughts still publish incrementally on completed summary parts. Default: `true`.
 - `--reasoning-summary`: app-server reasoning summary level to request: `auto`, `concise`, `detailed`, or `none`. Default: `auto`.
 - `--reasoning-thoughts`: reasoning lane projected as ACP thoughts: `off`, `summary`, `content`, or `both`. Default: `summary`; when no summary is available, completed raw content is emitted as a fallback thought.
 - `--debug`: enable debug logging.

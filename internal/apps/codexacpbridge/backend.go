@@ -363,12 +363,22 @@ func appServerOptOutNotificationMethods(opts Options) []string {
 	if !opts.MessageStreaming {
 		methods = append(methods, methodAgentMessageDelta)
 	}
-	if !opts.reasoningThoughtsEnabled() || !opts.reasoningStreamingEnabled() {
+	if !opts.reasoningThoughtsEnabled() {
 		methods = append(methods,
 			methodReasoningTextDelta,
 			methodReasoningSummaryTextDelta,
 			methodReasoningSummaryPartAdded,
 		)
+		return methods
+	}
+	if !opts.reasoningStreamingEnabled() {
+		methods = append(methods, methodReasoningTextDelta)
+		if !opts.reasoningThoughtsIncludeSummary() {
+			methods = append(methods,
+				methodReasoningSummaryTextDelta,
+				methodReasoningSummaryPartAdded,
+			)
+		}
 		return methods
 	}
 	if !opts.reasoningThoughtsIncludeContent() {
