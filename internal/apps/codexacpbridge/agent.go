@@ -731,6 +731,7 @@ func (a *codexACPProxyAgent) Prompt(ctx context.Context, params acp.PromptReques
 			}
 			if usage != nil {
 				meta["usage"] = usage
+				resp.Usage = acpUsageFromMap(usage)
 			}
 			if rateLimits := a.sessionRateLimits(params.SessionId); len(rateLimits) > 0 {
 				meta["rateLimits"] = rateLimits
@@ -2525,10 +2526,47 @@ func usageFromTokenNotification(params map[string]any) map[string]any {
 	if v, ok := last["cachedInputTokens"]; ok {
 		usage["cachedReadTokens"] = v
 	}
+	if v, ok := last["reasoningOutputTokens"]; ok {
+		usage["thoughtTokens"] = v
+	}
 	if len(usage) == 0 {
 		return nil
 	}
 	return usage
+}
+
+func acpUsageFromMap(usage map[string]any) *acp.Usage {
+	if len(usage) == 0 {
+		return nil
+	}
+	out := &acp.Usage{}
+	found := false
+	if v, ok := int64Value(usage, "inputTokens"); ok {
+		out.InputTokens = int(v)
+		found = true
+	}
+	if v, ok := int64Value(usage, "outputTokens"); ok {
+		out.OutputTokens = int(v)
+		found = true
+	}
+	if v, ok := int64Value(usage, "totalTokens"); ok {
+		out.TotalTokens = int(v)
+		found = true
+	}
+	if v, ok := int64Value(usage, "cachedReadTokens"); ok {
+		cachedReadTokens := int(v)
+		out.CachedReadTokens = &cachedReadTokens
+		found = true
+	}
+	if v, ok := int64Value(usage, "thoughtTokens"); ok {
+		thoughtTokens := int(v)
+		out.ThoughtTokens = &thoughtTokens
+		found = true
+	}
+	if !found {
+		return nil
+	}
+	return out
 }
 
 func stopReasonFromTurnStatus(status string) acp.StopReason {

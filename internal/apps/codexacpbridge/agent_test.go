@@ -1377,10 +1377,11 @@ func TestUsageFromTokenNotificationUsesLastFieldsOnly(t *testing.T) {
 	usage := usageFromTokenNotification(map[string]any{
 		"tokenUsage": map[string]any{
 			"last": map[string]any{
-				"inputTokens":       10,
-				"outputTokens":      2,
-				"totalTokens":       12,
-				"cachedInputTokens": 4,
+				"inputTokens":           10,
+				"outputTokens":          2,
+				"totalTokens":           12,
+				"cachedInputTokens":     4,
+				"reasoningOutputTokens": 3,
 			},
 			"total": map[string]any{
 				"inputTokens": 999,
@@ -1403,8 +1404,30 @@ func TestUsageFromTokenNotificationUsesLastFieldsOnly(t *testing.T) {
 	if got := usage["cachedReadTokens"]; got != 4 {
 		t.Fatalf("usage.cachedReadTokens = %#v, want %d", got, 4)
 	}
+	if got := usage["thoughtTokens"]; got != 3 {
+		t.Fatalf("usage.thoughtTokens = %#v, want %d", got, 3)
+	}
 	if _, ok := usage["modelContextWindow"]; ok {
 		t.Fatalf("usage unexpectedly includes modelContextWindow: %#v", usage)
+	}
+	acpUsage := acpUsageFromMap(usage)
+	if acpUsage == nil {
+		t.Fatal("acpUsageFromMap() = nil, want non-nil")
+	}
+	if acpUsage.InputTokens != 10 {
+		t.Fatalf("acpUsage.InputTokens = %d, want 10", acpUsage.InputTokens)
+	}
+	if acpUsage.OutputTokens != 2 {
+		t.Fatalf("acpUsage.OutputTokens = %d, want 2", acpUsage.OutputTokens)
+	}
+	if acpUsage.TotalTokens != 12 {
+		t.Fatalf("acpUsage.TotalTokens = %d, want 12", acpUsage.TotalTokens)
+	}
+	if acpUsage.CachedReadTokens == nil || *acpUsage.CachedReadTokens != 4 {
+		t.Fatalf("acpUsage.CachedReadTokens = %#v, want 4", acpUsage.CachedReadTokens)
+	}
+	if acpUsage.ThoughtTokens == nil || *acpUsage.ThoughtTokens != 3 {
+		t.Fatalf("acpUsage.ThoughtTokens = %#v, want 3", acpUsage.ThoughtTokens)
 	}
 }
 
@@ -2706,10 +2729,11 @@ func TestPromptMapsExtendedNotifications(t *testing.T) {
 		"turnId":   "turn-1",
 		"tokenUsage": map[string]any{
 			"last": map[string]any{
-				"inputTokens":       10,
-				"outputTokens":      2,
-				"totalTokens":       12,
-				"cachedInputTokens": 4,
+				"inputTokens":           10,
+				"outputTokens":          2,
+				"totalTokens":           12,
+				"cachedInputTokens":     4,
+				"reasoningOutputTokens": 3,
 			},
 		},
 	})
@@ -2773,6 +2797,24 @@ func TestPromptMapsExtendedNotifications(t *testing.T) {
 	meta := promptResp.Meta
 	if _, ok := meta["usage"]; !ok {
 		t.Fatalf("PromptResponse.Meta.usage missing: %#v", promptResp.Meta)
+	}
+	if promptResp.Usage == nil {
+		t.Fatalf("PromptResponse.Usage missing")
+	}
+	if promptResp.Usage.InputTokens != 10 {
+		t.Fatalf("PromptResponse.Usage.InputTokens = %d, want 10", promptResp.Usage.InputTokens)
+	}
+	if promptResp.Usage.OutputTokens != 2 {
+		t.Fatalf("PromptResponse.Usage.OutputTokens = %d, want 2", promptResp.Usage.OutputTokens)
+	}
+	if promptResp.Usage.TotalTokens != 12 {
+		t.Fatalf("PromptResponse.Usage.TotalTokens = %d, want 12", promptResp.Usage.TotalTokens)
+	}
+	if promptResp.Usage.CachedReadTokens == nil || *promptResp.Usage.CachedReadTokens != 4 {
+		t.Fatalf("PromptResponse.Usage.CachedReadTokens = %#v, want 4", promptResp.Usage.CachedReadTokens)
+	}
+	if promptResp.Usage.ThoughtTokens == nil || *promptResp.Usage.ThoughtTokens != 3 {
+		t.Fatalf("PromptResponse.Usage.ThoughtTokens = %#v, want 3", promptResp.Usage.ThoughtTokens)
 	}
 	if _, ok := meta["rateLimits"]; !ok {
 		t.Fatalf("PromptResponse.Meta.rateLimits missing: %#v", promptResp.Meta)
