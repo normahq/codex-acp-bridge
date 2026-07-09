@@ -3064,6 +3064,22 @@ func (a *codexACPProxyAgent) handleCompletedReasoning(ctx context.Context, sessi
 		}
 		return nil
 	}
+	if a.reasoningThoughtsIncludeSummary() {
+		kind := reasoningKindSummary
+		texts := summaryTexts
+		if !hasCompletedReasoningText(texts) && !a.reasoningThoughtsIncludeContent() {
+			kind = reasoningKindContent
+			texts = contentTexts
+		}
+		if err := a.emitCompletedReasoningTexts(ctx, sessionID, itemID, kind, texts); err != nil {
+			return err
+		}
+	}
+	if a.reasoningThoughtsIncludeContent() {
+		if err := a.emitCompletedReasoningTexts(ctx, sessionID, itemID, reasoningKindContent, contentTexts); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

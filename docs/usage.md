@@ -28,7 +28,7 @@ codex-acp-bridge --name team-codex
 # Stream app-server agent messages live
 codex-acp-bridge --message-streaming
 
-# Disable app-server reasoning/thought streaming
+# Disable live reasoning/thought streaming; completed reasoning still emits aggregated thoughts
 codex-acp-bridge --reasoning-streaming=false
 ```
 
@@ -63,7 +63,7 @@ acp-repl -- codex-acp-bridge
   Stream app-server `item/agentMessage/delta` notifications as ACP `agent_message_chunk` updates.
   Default: `false`.
 - `--reasoning-streaming`:
-  Stream app-server reasoning deltas live when enabled. When disabled, suppress ACP thought output from reasoning entirely.
+  Stream app-server reasoning deltas live when enabled. When disabled, suppress reasoning delta streaming but still emit completed reasoning items as aggregated ACP thoughts.
   Default: `true`.
 - `--reasoning-summary`:
   Request app-server reasoning summaries: `auto`, `concise`, `detailed`, or `none`.

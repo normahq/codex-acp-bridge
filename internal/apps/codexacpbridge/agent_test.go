@@ -1644,7 +1644,7 @@ func TestPromptDoesNotProjectNonToolItemLifecycleAsToolCalls(t *testing.T) {
 	}
 }
 
-func TestPromptSuppressesReasoningThoughtsWhenReasoningStreamingDisabled(t *testing.T) {
+func TestPromptEmitsCompletedReasoningThoughtsWhenReasoningStreamingDisabled(t *testing.T) {
 	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
 	queueNotification(session, "item/completed", map[string]any{
 		"threadId": "thr-1",
@@ -1686,8 +1686,89 @@ func TestPromptSuppressesReasoningThoughtsWhenReasoningStreamingDisabled(t *test
 	}
 
 	chunks := thoughtChunks(conn.sessionUpdates(newResp.SessionId))
-	if len(chunks) != 0 {
-		t.Fatalf("thought chunk count = %d, want 0: %#v", len(chunks), chunks)
+	if len(chunks) != 2 {
+		t.Fatalf("thought chunk count = %d, want 2: %#v", len(chunks), chunks)
+	}
+	if got := thoughtChunkText(chunks[0]); got != "summary one" {
+		t.Fatalf("first thought text = %q, want summary one", got)
+	}
+	if got := thoughtChunkText(chunks[1]); got != "summary two" {
+		t.Fatalf("second thought text = %q, want summary two", got)
+	}
+	for i, chunk := range chunks {
+		if got := thoughtChunkMetaString(chunk, metaReasoningKindKey); got != reasoningKindSummary {
+			t.Fatalf("thought %d reasoning kind = %q, want %q", i, got, reasoningKindSummary)
+		}
+		if got, ok := thoughtChunkMetaBool(chunk, metaCompletedKey); !ok || !got {
+			t.Fatalf("thought %d completed meta = (%t,%t), want (true,true)", i, got, ok)
+		}
+	}
+	if countThoughtText(conn.sessionUpdates(newResp.SessionId), "raw one") != 0 {
+		t.Fatalf("unexpected raw reasoning content in default summary mode: %#v", chunks)
+	}
+}
+
+func TestPromptEmitsCompletedReasoningBothLanesWhenReasoningStreamingDisabled(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	queueNotification(session, "item/completed", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"item": map[string]any{
+			"type":    "reasoning",
+			"id":      "item-reasoning-1",
+			"summary": []any{"summary"},
+			"content": []any{"raw"},
+		},
+	})
+	queueNotification(session, "turn/completed", map[string]any{
+		"threadId": "thr-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "completed",
+		},
+	})
+
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+	opts := Options{ReasoningThoughts: "both"}
+	opts.SetReasoningStreaming(false)
+	agent.setBridgeOptions(opts)
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	}); err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+
+	chunks := thoughtChunks(conn.sessionUpdates(newResp.SessionId))
+	if len(chunks) != 2 {
+		t.Fatalf("thought chunk count = %d, want 2: %#v", len(chunks), chunks)
+	}
+	if got := thoughtChunkText(chunks[0]); got != "summary" {
+		t.Fatalf("first thought text = %q, want summary", got)
+	}
+	if got := thoughtChunkMetaString(chunks[0], metaReasoningKindKey); got != reasoningKindSummary {
+		t.Fatalf("first thought reasoning kind = %q, want %q", got, reasoningKindSummary)
+	}
+	if got := thoughtChunkText(chunks[1]); got != "raw" {
+		t.Fatalf("second thought text = %q, want raw", got)
+	}
+	if got := thoughtChunkMetaString(chunks[1], metaReasoningKindKey); got != reasoningKindContent {
+		t.Fatalf("second thought reasoning kind = %q, want %q", got, reasoningKindContent)
+	}
+	for i, chunk := range chunks {
+		if got, ok := thoughtChunkMetaBool(chunk, metaCompletedKey); !ok || !got {
+			t.Fatalf("thought %d completed meta = (%t,%t), want (true,true)", i, got, ok)
+		}
 	}
 }
 
