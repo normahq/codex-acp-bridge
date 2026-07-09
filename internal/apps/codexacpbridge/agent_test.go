@@ -2728,6 +2728,13 @@ func TestPromptMapsExtendedNotifications(t *testing.T) {
 		"threadId": "thr-1",
 		"turnId":   "turn-1",
 		"tokenUsage": map[string]any{
+			"total": map[string]any{
+				"inputTokens":           30,
+				"outputTokens":          6,
+				"totalTokens":           36,
+				"cachedInputTokens":     8,
+				"reasoningOutputTokens": 5,
+			},
 			"last": map[string]any{
 				"inputTokens":           10,
 				"outputTokens":          2,
@@ -2735,6 +2742,7 @@ func TestPromptMapsExtendedNotifications(t *testing.T) {
 				"cachedInputTokens":     4,
 				"reasoningOutputTokens": 3,
 			},
+			"modelContextWindow": 258400,
 		},
 	})
 	queueNotification(session, "turn/completed", map[string]any{
@@ -2819,10 +2827,15 @@ func TestPromptMapsExtendedNotifications(t *testing.T) {
 	if _, ok := meta["rateLimits"]; !ok {
 		t.Fatalf("PromptResponse.Meta.rateLimits missing: %#v", promptResp.Meta)
 	}
-	for _, update := range updates {
-		if update.Update.UsageUpdate != nil {
-			t.Fatalf("unexpected ACP usage_update from app-server rate limits: %#v", update.Update.UsageUpdate)
-		}
+	usageUpdate := latestUsageUpdate(updates)
+	if usageUpdate == nil {
+		t.Fatalf("missing ACP session usage_update: %#v", updates)
+	}
+	if usageUpdate.Size != 258400 {
+		t.Fatalf("usage_update.Size = %d, want 258400", usageUpdate.Size)
+	}
+	if usageUpdate.Used != 36 {
+		t.Fatalf("usage_update.Used = %d, want 36", usageUpdate.Used)
 	}
 }
 
@@ -4392,6 +4405,15 @@ func thoughtChunkMetaBool(chunk *acp.SessionUpdateAgentThoughtChunk, key string)
 	}
 	b, ok := v.(bool)
 	return b, ok
+}
+
+func latestUsageUpdate(updates []acp.SessionNotification) *acp.SessionUsageUpdate {
+	for i := len(updates) - 1; i >= 0; i-- {
+		if updates[i].Update.UsageUpdate != nil {
+			return updates[i].Update.UsageUpdate
+		}
+	}
+	return nil
 }
 
 func requireReasoningEffortOption(t *testing.T, options []acp.SessionConfigOption) *acp.SessionConfigOptionSelect {

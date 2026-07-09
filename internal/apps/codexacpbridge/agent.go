@@ -1875,6 +1875,11 @@ func (a *codexACPProxyAgent) handleNotification(
 		}
 	case "thread/tokenUsage/updated":
 		usage = usageFromTokenNotification(params)
+		if update := sessionUsageUpdateFromTokenNotification(params); update != nil {
+			if err := a.sendUpdate(ctx, sessionID, acp.SessionUpdate{UsageUpdate: update}); err != nil {
+				return false, "", nil, nil, err
+			}
+		}
 	case "turn/completed":
 		if sessionID != "" {
 			a.clearPendingRequests(sessionID)
@@ -2533,6 +2538,24 @@ func usageFromTokenNotification(params map[string]any) map[string]any {
 		return nil
 	}
 	return usage
+}
+
+func sessionUsageUpdateFromTokenNotification(params map[string]any) *acp.SessionUsageUpdate {
+	tokenUsage := mapValue(params, "tokenUsage")
+	if len(tokenUsage) == 0 {
+		return nil
+	}
+	size, sizeOK := int64Value(tokenUsage, "modelContextWindow")
+	total := mapValue(tokenUsage, "total")
+	used, usedOK := int64Value(total, "totalTokens")
+	if !sizeOK || !usedOK {
+		return nil
+	}
+	return &acp.SessionUsageUpdate{
+		SessionUpdate: "usage_update",
+		Size:          int(size),
+		Used:          int(used),
+	}
 }
 
 func acpUsageFromMap(usage map[string]any) *acp.Usage {
