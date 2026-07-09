@@ -84,7 +84,8 @@ Reasoning summary request:
 | `item/completed` | `threadId,turnId,item` | item lifecycle completed | Finalizes ACP tool-call lifecycle for tool-like item types. For `agentMessage`, `item/completed` is always authoritative final state. When message streaming is enabled, it closes the logical `agent_message_chunk` stream with `_meta["codex-acp-bridge/completed"]=true` and emits `item.text` only when no deltas were streamed. When message streaming is disabled, visible phases (missing/null/empty or `final_answer`) project to `session/update.agent_message_chunk`; `commentary` stays hidden. For `reasoning`, completed items close any open streamed thought lane; when `--reasoning-streaming=false`, they emit no ACP thought output. For `plan`, the completed item text replaces the draft text for that item and the bridge emits a full ACP plan replacement. |
 | `turn/plan/updated` | `threadId,turnId,plan` | plan snapshot update | Authoritative whole-plan snapshot. The bridge clears delta-derived preview state and emits the provided entries as the full ACP plan replacement, including an empty list when the snapshot is empty. |
 | `turn/diff/updated` | `threadId,turnId,diff` | no ACP streaming update | Diff is not emitted as thought/message/tool content. |
-| `thread/tokenUsage/updated` | `threadId,turnId,tokenUsage` | usage update | Forwards `tokenUsage.last.{inputTokens,outputTokens,totalTokens,cachedInputTokens}` into ACP meta usage (`cachedInputTokens` -> `cachedReadTokens`). |
+| `thread/tokenUsage/updated` | `threadId,turnId,tokenUsage` | prompt token usage | Forwards per-turn `tokenUsage.last.{inputTokens,outputTokens,totalTokens,cachedInputTokens,reasoningOutputTokens}` into `session/prompt.usage` and `_meta.usage` (`cachedInputTokens` -> `cachedReadTokens`, `reasoningOutputTokens` -> `thoughtTokens`). |
+| `account/rateLimits/updated` | `rateLimits` | account rate-limit metadata | Preserves app-server usage-limit windows in `session/prompt._meta.rateLimits`. These are account/quota limits, not per-prompt token usage, and are not emitted as ACP `usage_update`. |
 | `error` | `threadId,turnId,error,willRetry` | error event | If `willRetry=false`, finalize the prompt and preserve `error` in `session/prompt._meta.error`. |
 | `turn/completed` | `threadId,turn` | turn completed | Authoritative prompt terminal signal. Latest schema does not require a top-level `turnId`; if present, it must match the active turn. |
 | `serverRequest/resolved` | `threadId,requestId` | request lifecycle ack | Clear pending request state. |
@@ -190,7 +191,7 @@ For request types without a native ACP equivalent, the adapter uses ACP `session
   - `thread.sessionId` remains the backend session-tree identifier and is not used as the ACP resume handle.
   - ACP `session/load` is not implemented because the bridge does not replay prior ACP history before returning.
 - Prompt completion: `turn/completed`; `error` with `willRetry=false`.
-- Usage and metadata: `thread/tokenUsage/updated`, `account/rateLimits/updated`,
+- Usage and metadata: `thread/tokenUsage/updated` supplies per-turn token usage; `account/rateLimits/updated` supplies account/quota limit metadata;
   `mcpServer/startupStatus/updated`.
 - Request lifecycle: `serverRequest/resolved`.
 - Thread correlation: `thread/started`, `turn/started`.

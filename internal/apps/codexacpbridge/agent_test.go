@@ -2819,6 +2819,11 @@ func TestPromptMapsExtendedNotifications(t *testing.T) {
 	if _, ok := meta["rateLimits"]; !ok {
 		t.Fatalf("PromptResponse.Meta.rateLimits missing: %#v", promptResp.Meta)
 	}
+	for _, update := range updates {
+		if update.Update.UsageUpdate != nil {
+			t.Fatalf("unexpected ACP usage_update from app-server rate limits: %#v", update.Update.UsageUpdate)
+		}
+	}
 }
 
 func TestPromptStopsOnErrorNotificationWithoutRetry(t *testing.T) {
