@@ -1554,6 +1554,7 @@ func (a *codexACPProxyAgent) handleNotification(
 	case "error":
 		willRetry, ok := boolValue(params, "willRetry")
 		if ok && !willRetry {
+			a.logTerminalPromptError("error", sessionID, threadID, turnID, acp.StopReasonEndTurn, params["error"])
 			return true, acp.StopReasonEndTurn, usageFromTokenNotification(params), params["error"], nil
 		}
 	case "thread/status/changed":
@@ -1896,7 +1897,12 @@ func (a *codexACPProxyAgent) handleNotification(
 		}
 		turn := mapValue(params, "turn")
 		status := stringValue(turn, "status")
-		return true, stopReasonFromTurnStatus(status), usageFromTokenNotification(params), turnErrorMeta(turn, status), nil
+		stopReason := stopReasonFromTurnStatus(status)
+		errorMeta := turnErrorMeta(turn, status)
+		if errorMeta != nil {
+			a.logTerminalPromptError("turn/completed", sessionID, threadID, turnID, stopReason, errorMeta)
+		}
+		return true, stopReason, usageFromTokenNotification(params), errorMeta, nil
 	}
 	return false, "", usage, nil, nil
 }
@@ -2616,6 +2622,55 @@ func turnErrorMeta(turn map[string]any, status string) any {
 		return nil
 	}
 	return turn["error"]
+}
+
+func (a *codexACPProxyAgent) logTerminalPromptError(source string, sessionID acp.SessionId, threadID string, turnID string, stopReason acp.StopReason, errorMeta any) {
+	if errorMeta == nil || a.logger == nil {
+		return
+	}
+	event := a.logger.Warn().
+		Str("source", source).
+		Str("session_id", string(sessionID)).
+		Str("thread_id", strings.TrimSpace(threadID)).
+		Str("turn_id", strings.TrimSpace(turnID)).
+		Str("stop_reason", string(stopReason)).
+		Interface("error_meta", cloneJSONValue(errorMeta))
+	if errMap, ok := errorMeta.(map[string]any); ok {
+		if msg := strings.TrimSpace(stringValue(errMap, "message")); msg != "" {
+			event = event.Str("error_message", msg)
+		}
+		if code := strings.TrimSpace(terminalErrorCodeForLog(errMap)); code != "" {
+			event = event.Str("error_code", code)
+		}
+	}
+	event.Msg("prompt completed with terminal error")
+}
+
+func terminalErrorCodeForLog(errMeta map[string]any) string {
+	if len(errMeta) == 0 {
+		return ""
+	}
+	for _, key := range []string{"code", "kind", "type", "codexErrorInfo"} {
+		value, ok := errMeta[key]
+		if !ok {
+			continue
+		}
+		switch typed := value.(type) {
+		case string:
+			if text := strings.TrimSpace(typed); text != "" {
+				return text
+			}
+		case map[string]any:
+			if len(typed) == 1 {
+				for nested := range typed {
+					if text := strings.TrimSpace(nested); text != "" {
+						return text
+					}
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func findAppServerModel(models []appServerModel, modelID string) (appServerModel, bool) {

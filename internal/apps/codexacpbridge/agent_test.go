@@ -1,6 +1,7 @@
 package codexacp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -3225,6 +3226,51 @@ func TestPromptStopsOnErrorNotificationWithoutRetry(t *testing.T) {
 	}
 }
 
+func TestPromptWarnLogsTerminalErrorNotificationWithoutRetry(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	queueNotification(session, "error", map[string]any{
+		"threadId":  "thr-1",
+		"turnId":    "turn-1",
+		"willRetry": false,
+		"error": map[string]any{
+			"message": "fatal boom",
+			"code":    "quota_exceeded",
+		},
+	})
+
+	conn := &fakeACPAppConnection{}
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs)
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &logger)
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	}); err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+
+	got := logs.String()
+	for _, want := range []string{
+		`"level":"warn"`,
+		`"error_message":"fatal boom"`,
+		`"error_code":"quota_exceeded"`,
+		`"source":"error"`,
+		`prompt completed with terminal error`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("logs missing %q: %s", want, got)
+		}
+	}
+}
+
 func TestPromptMetaIncludesTurnFailureErrorDetails(t *testing.T) {
 	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
 	queueNotification(session, "turn/completed", map[string]any{
@@ -3268,6 +3314,54 @@ func TestPromptMetaIncludesTurnFailureErrorDetails(t *testing.T) {
 	}
 	if got := stringValue(errMeta, "codexErrorInfo"); got != "other" {
 		t.Fatalf("PromptResponse.Meta.error.codexErrorInfo = %q, want %q", got, "other")
+	}
+}
+
+func TestPromptWarnLogsTurnFailureErrorDetails(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	queueNotification(session, "turn/completed", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "failed",
+			"error": map[string]any{
+				"message":        "model not supported",
+				"codexErrorInfo": "other",
+			},
+		},
+	})
+
+	conn := &fakeACPAppConnection{}
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs)
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &logger)
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	}); err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+
+	got := logs.String()
+	for _, want := range []string{
+		`"level":"warn"`,
+		`"error_message":"model not supported"`,
+		`"error_code":"other"`,
+		`"source":"turn/completed"`,
+		`prompt completed with terminal error`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("logs missing %q: %s", want, got)
+		}
 	}
 }
 
