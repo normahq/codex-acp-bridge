@@ -158,6 +158,7 @@ Validation and precedence:
 
 - `session/new._meta.sessionId` is rejected; ACP session ids are backend-generated and durable.
 - Unknown `codex` keys are rejected with ACP `invalid_params`.
+- `session/new._meta.codex.sandbox` overrides the bridge `--sandbox` default when both are set.
 - `profile` overrides `config.profile`.
 - `compactPrompt` overrides `config.compact_prompt`.
 - ACP `mcpServers` mapping overrides same-name entries in `config.mcp_servers` (merge semantics; non-overlapping entries are retained).

@@ -148,3 +148,17 @@ func TestOptionalMetaHelpers(t *testing.T) {
 		t.Fatalf("optionalMetaBool(valid) = %#v, want pointer to true", boolValue)
 	}
 }
+
+func TestSessionConfigFromNewSessionMetaCodexSandboxOverridesDefaults(t *testing.T) {
+	_, cfg, err := sessionConfigFromNewSessionMeta(map[string]any{
+		"codex": map[string]any{
+			"sandbox": "workspace-write",
+		},
+	}, codexAppConfig{Sandbox: "read-only"})
+	if err != nil {
+		t.Fatalf("sessionConfigFromNewSessionMeta() error = %v", err)
+	}
+	if got, want := cfg.Sandbox, "workspace-write"; got != want {
+		t.Fatalf("cfg.Sandbox = %q, want %q", got, want)
+	}
+}
