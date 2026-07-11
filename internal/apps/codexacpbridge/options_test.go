@@ -81,7 +81,7 @@ func TestCloneMap(t *testing.T) {
 
 func TestOptionsAppConfigIncludesSandbox(t *testing.T) {
 	cfg := Options{Sandbox: " workspace-write "}.appConfig()
-	if got, want := cfg.Sandbox, "workspace-write"; got != want {
+	if got, want := cfg.Sandbox, testSandboxWorkspaceWrite; got != want {
 		t.Fatalf("appConfig().Sandbox = %q, want %q", got, want)
 	}
 }
