@@ -27,6 +27,7 @@ const (
 	testPersonalityPragmatic   = "pragmatic"
 	testPlanRunTests           = "Run tests"
 	testReasoningXHigh         = "xhigh"
+	testSandboxWorkspaceWrite  = testSandboxWorkspaceWrite
 	testServiceTierFlex        = "flex"
 	testThreadOne              = "thr-1"
 	testThreadLive             = "thr-live"
@@ -50,7 +51,7 @@ func TestBuildThreadStartParamsIncludesConfigAndMCPServers(t *testing.T) {
 			ModelProvider:         "openai",
 			Personality:           testPersonalityPragmatic,
 			Profile:               "dev-profile",
-			Sandbox:               "workspace-write",
+			Sandbox:               testSandboxWorkspaceWrite,
 			ServiceTier:           testServiceTierFlex,
 		},
 		"",
@@ -132,7 +133,7 @@ func TestNewSessionAppliesCodexMetaOverridesToThreadStart(t *testing.T) {
 		Cwd: "/tmp/work",
 		Meta: map[string]any{
 			"codex": map[string]any{
-				"sandbox":               "workspace-write",
+				"sandbox":               testSandboxWorkspaceWrite,
 				"approvalPolicy":        testApprovalOnRequest,
 				"approvalsReviewer":     testApprovalsReviewerGuard,
 				"baseInstructions":      "meta-base",
@@ -195,8 +196,8 @@ func TestNewSessionAppliesCodexMetaOverridesToThreadStart(t *testing.T) {
 		t.Fatalf("thread/start calls = %d, want 1", len(threadStartParams))
 	}
 	params := threadStartParams[0]
-	if got := stringValue(params, "sandbox"); got != "workspace-write" {
-		t.Fatalf("sandbox = %q, want %q", got, "workspace-write")
+	if got := stringValue(params, "sandbox"); got != testSandboxWorkspaceWrite {
+		t.Fatalf("sandbox = %q, want %q", got, testSandboxWorkspaceWrite)
 	}
 	if got := stringValue(params, "approvalPolicy"); got != testApprovalOnRequest {
 		t.Fatalf("approvalPolicy = %q, want %q", got, testApprovalOnRequest)
@@ -372,7 +373,7 @@ func TestSessionModeIsStoredButNotForwardedToBackendPayloads(t *testing.T) {
 
 	if _, err := agent.SetSessionMode(context.Background(), acp.SetSessionModeRequest{
 		SessionId: newResp.SessionId,
-		ModeId:    acp.SessionModeId("workspace-write"),
+		ModeId:    acp.SessionModeId(testSandboxWorkspaceWrite),
 	}); err != nil {
 		t.Fatalf("SetSessionMode() error = %v", err)
 	}
