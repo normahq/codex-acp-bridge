@@ -27,7 +27,7 @@ const (
 	testPersonalityPragmatic   = "pragmatic"
 	testPlanRunTests           = "Run tests"
 	testReasoningXHigh         = "xhigh"
-	testSandboxWorkspaceWrite  = testSandboxWorkspaceWrite
+	testSandboxWorkspaceWrite  = "workspace-write"
 	testServiceTierFlex        = "flex"
 	testThreadOne              = "thr-1"
 	testThreadLive             = "thr-live"
