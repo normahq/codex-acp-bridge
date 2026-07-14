@@ -357,6 +357,7 @@ func (a *codexACPProxyAgent) NewSession(ctx context.Context, params acp.NewSessi
 			resp.ConfigOptions = configOptions
 		}
 	}
+	resp.Modes = sessionModeState(sessionState.mode)
 	if mcpMeta := a.sessionMCPMeta(sessionID, false); len(mcpMeta) > 0 {
 		resp.Meta = map[string]any{
 			"codex": map[string]any{
@@ -486,6 +487,7 @@ func (a *codexACPProxyAgent) restoreSession(
 		resp.models = modelState
 		resp.configOptions = configOptions
 	}
+	resp.modes = sessionModeState(sessionState.mode)
 	if mcpMeta := a.sessionMCPMeta(sessionID, false); len(mcpMeta) > 0 {
 		resp.meta = map[string]any{
 			"codex": map[string]any{
@@ -499,6 +501,7 @@ func (a *codexACPProxyAgent) restoreSession(
 type sessionRestoreResponse struct {
 	models        *acp.SessionModelState
 	configOptions []acp.SessionConfigOption
+	modes         *acp.SessionModeState
 	meta          map[string]any
 }
 
@@ -507,6 +510,7 @@ func (r sessionRestoreResponse) ResumeResponse() acp.ResumeSessionResponse {
 		ConfigOptions: r.configOptions,
 		Meta:          cloneAnyMap(r.meta),
 		Models:        r.models,
+		Modes:         r.modes,
 	}
 }
 
@@ -632,6 +636,21 @@ func newSessionState(
 		state.reasoningEffort = strings.TrimSpace(*reasoningEffort)
 	}
 	return state
+}
+
+func sessionModeState(mode string) *acp.SessionModeState {
+	currentMode := strings.TrimSpace(mode)
+	availableModes := []acp.SessionMode{}
+	if currentMode != "" {
+		availableModes = append(availableModes, acp.SessionMode{
+			Id:   acp.SessionModeId(currentMode),
+			Name: currentMode,
+		})
+	}
+	return &acp.SessionModeState{
+		AvailableModes: availableModes,
+		CurrentModeId:  acp.SessionModeId(currentMode),
+	}
 }
 
 func (a *codexACPProxyAgent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {

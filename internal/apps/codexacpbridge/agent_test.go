@@ -636,6 +636,12 @@ func TestNewSessionIncludesModelsFromModelList(t *testing.T) {
 	if !modelOptionsInclude(option, "gpt-5.4-mini") {
 		t.Fatalf("model config options missing gpt-5.4-mini: %#v", option.Options)
 	}
+	if resp.Modes == nil {
+		t.Fatal("NewSession().Modes = nil, want non-nil")
+	}
+	if got := resp.Modes.CurrentModeId; got != "" {
+		t.Fatalf("NewSession().Modes.CurrentModeId = %q, want empty", got)
+	}
 }
 
 func TestLoadSessionReturnsMethodNotFound(t *testing.T) {
@@ -770,6 +776,28 @@ func TestResumeSessionUsesACPIDAsThreadID(t *testing.T) {
 	}
 	if session.threadListCalls != 0 {
 		t.Fatalf("thread/list calls = %d, want 0", session.threadListCalls)
+	}
+}
+
+func TestResumeSessionIncludesLegacyModes(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-mode-1", "turn-1")
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+
+	resp, err := agent.ResumeSession(context.Background(), acp.ResumeSessionRequest{
+		SessionId: "thr-mode-1",
+		Cwd:       "/tmp/work",
+	})
+	if err != nil {
+		t.Fatalf("ResumeSession() error = %v", err)
+	}
+	if resp.Modes == nil {
+		t.Fatal("ResumeSession().Modes = nil, want non-nil")
+	}
+	if got := resp.Modes.CurrentModeId; got != "" {
+		t.Fatalf("ResumeSession().Modes.CurrentModeId = %q, want empty", got)
 	}
 }
 
