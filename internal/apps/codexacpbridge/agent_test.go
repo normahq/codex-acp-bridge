@@ -2607,6 +2607,8 @@ func TestPromptBridgesCommandApprovalRequest(t *testing.T) {
 		"turnId":             "turn-1",
 		"itemId":             "item-cmd-1",
 		"command":            "curl example.com",
+		"cwd":                "/tmp/work",
+		"reason":             "The command needs network access.",
 		"availableDecisions": []any{decisionDecline, decisionAcceptForSession},
 	})
 	queueNotification(session, "turn/completed", map[string]any{
@@ -2642,6 +2644,14 @@ func TestPromptBridgesCommandApprovalRequest(t *testing.T) {
 
 	if got := len(conn.permissionRequests); got != 1 {
 		t.Fatalf("permission requests = %d, want 1", got)
+	}
+	request := conn.permissionRequests[0]
+	if len(request.ToolCall.Content) != 1 || request.ToolCall.Content[0].Content == nil || request.ToolCall.Content[0].Content.Content.Text == nil {
+		t.Fatalf("permission content = %#v, want one text block", request.ToolCall.Content)
+	}
+	wantContent := "The command needs network access.\n\nCommand:\n```sh\ncurl example.com\n```\n\nWorking directory: `/tmp/work`"
+	if got := request.ToolCall.Content[0].Content.Content.Text.Text; got != wantContent {
+		t.Fatalf("permission content = %q, want %q", got, wantContent)
 	}
 	responses := session.responsesSnapshot()
 	if len(responses) != 1 {

@@ -2127,6 +2127,7 @@ func (a *codexACPProxyAgent) requestDecision(
 			ToolCallId: permissionToolCallID(rawInput),
 			Title:      acp.Ptr(title),
 			Kind:       acp.Ptr(toolKind),
+			Content:    permissionRequestContent(toolKind, rawInput),
 			RawInput:   rawInput,
 			Status:     acp.Ptr(acp.ToolCallStatusPending),
 		},
@@ -2144,6 +2145,35 @@ func (a *codexACPProxyAgent) requestDecision(
 		return decisionCancel, nil
 	}
 	return decision, nil
+}
+
+func permissionRequestContent(toolKind acp.ToolKind, rawInput map[string]any) []acp.ToolCallContent {
+	var content strings.Builder
+	if reason := strings.TrimSpace(stringValue(rawInput, "reason")); reason != "" {
+		content.WriteString(reason)
+	}
+	if toolKind == acp.ToolKindExecute {
+		if command := strings.TrimSpace(stringValue(rawInput, "command")); command != "" {
+			if content.Len() > 0 {
+				content.WriteString("\n\n")
+			}
+			content.WriteString("Command:\n```sh\n")
+			content.WriteString(strings.ReplaceAll(command, "```", "` ` `"))
+			content.WriteString("\n```")
+		}
+		if cwd := strings.TrimSpace(stringValue(rawInput, "cwd")); cwd != "" {
+			if content.Len() > 0 {
+				content.WriteString("\n\n")
+			}
+			content.WriteString("Working directory: `")
+			content.WriteString(strings.ReplaceAll(cwd, "`", "'"))
+			content.WriteString("`")
+		}
+	}
+	if content.Len() == 0 {
+		return nil
+	}
+	return []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(content.String()))}
 }
 
 func permissionOptions(decisions []any) ([]acp.PermissionOption, map[acp.PermissionOptionId]any) {
