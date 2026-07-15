@@ -64,6 +64,7 @@ type Options struct {
 	ReasoningStreaming bool
 	ReasoningThoughts  string
 	ReasoningSummary   string
+	Sandbox            string
 
 	reasoningStreamingConfigured bool
 }
@@ -104,7 +105,9 @@ func (c codexAppConfig) clone() codexAppConfig {
 }
 
 func (o Options) appConfig() codexAppConfig {
-	return codexAppConfig{}
+	return codexAppConfig{
+		Sandbox: strings.TrimSpace(o.Sandbox),
+	}
 }
 
 func (o *Options) SetReasoningStreaming(enabled bool) {
@@ -165,6 +168,9 @@ func (o Options) validate() error {
 		return err
 	}
 	if err := validateEnumValue("reasoning summary", o.reasoningSummaryMode(), validReasoningSummaries); err != nil {
+		return err
+	}
+	if err := validateEnumValue("codex sandbox", o.Sandbox, validCodexSandboxModes); err != nil {
 		return err
 	}
 	return nil

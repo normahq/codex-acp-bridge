@@ -1,6 +1,7 @@
 package codexacp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -26,6 +27,7 @@ const (
 	testPersonalityPragmatic   = "pragmatic"
 	testPlanRunTests           = "Run tests"
 	testReasoningXHigh         = "xhigh"
+	testSandboxWorkspaceWrite  = "workspace-write"
 	testServiceTierFlex        = "flex"
 	testThreadOne              = "thr-1"
 	testThreadLive             = "thr-live"
@@ -49,7 +51,7 @@ func TestBuildThreadStartParamsIncludesConfigAndMCPServers(t *testing.T) {
 			ModelProvider:         "openai",
 			Personality:           testPersonalityPragmatic,
 			Profile:               "dev-profile",
-			Sandbox:               "workspace-write",
+			Sandbox:               testSandboxWorkspaceWrite,
 			ServiceTier:           testServiceTierFlex,
 		},
 		"",
@@ -131,7 +133,7 @@ func TestNewSessionAppliesCodexMetaOverridesToThreadStart(t *testing.T) {
 		Cwd: "/tmp/work",
 		Meta: map[string]any{
 			"codex": map[string]any{
-				"sandbox":               "workspace-write",
+				"sandbox":               testSandboxWorkspaceWrite,
 				"approvalPolicy":        testApprovalOnRequest,
 				"approvalsReviewer":     testApprovalsReviewerGuard,
 				"baseInstructions":      "meta-base",
@@ -194,8 +196,8 @@ func TestNewSessionAppliesCodexMetaOverridesToThreadStart(t *testing.T) {
 		t.Fatalf("thread/start calls = %d, want 1", len(threadStartParams))
 	}
 	params := threadStartParams[0]
-	if got := stringValue(params, "sandbox"); got != "workspace-write" {
-		t.Fatalf("sandbox = %q, want %q", got, "workspace-write")
+	if got := stringValue(params, "sandbox"); got != testSandboxWorkspaceWrite {
+		t.Fatalf("sandbox = %q, want %q", got, testSandboxWorkspaceWrite)
 	}
 	if got := stringValue(params, "approvalPolicy"); got != testApprovalOnRequest {
 		t.Fatalf("approvalPolicy = %q, want %q", got, testApprovalOnRequest)
@@ -371,7 +373,7 @@ func TestSessionModeIsStoredButNotForwardedToBackendPayloads(t *testing.T) {
 
 	if _, err := agent.SetSessionMode(context.Background(), acp.SetSessionModeRequest{
 		SessionId: newResp.SessionId,
-		ModeId:    acp.SessionModeId("workspace-write"),
+		ModeId:    acp.SessionModeId(testSandboxWorkspaceWrite),
 	}); err != nil {
 		t.Fatalf("SetSessionMode() error = %v", err)
 	}
@@ -634,6 +636,12 @@ func TestNewSessionIncludesModelsFromModelList(t *testing.T) {
 	if !modelOptionsInclude(option, "gpt-5.4-mini") {
 		t.Fatalf("model config options missing gpt-5.4-mini: %#v", option.Options)
 	}
+	if resp.Modes == nil {
+		t.Fatal("NewSession().Modes = nil, want non-nil")
+	}
+	if got := resp.Modes.CurrentModeId; got != "" {
+		t.Fatalf("NewSession().Modes.CurrentModeId = %q, want empty", got)
+	}
 }
 
 func TestLoadSessionReturnsMethodNotFound(t *testing.T) {
@@ -768,6 +776,28 @@ func TestResumeSessionUsesACPIDAsThreadID(t *testing.T) {
 	}
 	if session.threadListCalls != 0 {
 		t.Fatalf("thread/list calls = %d, want 0", session.threadListCalls)
+	}
+}
+
+func TestResumeSessionIncludesLegacyModes(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-mode-1", "turn-1")
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+
+	resp, err := agent.ResumeSession(context.Background(), acp.ResumeSessionRequest{
+		SessionId: "thr-mode-1",
+		Cwd:       "/tmp/work",
+	})
+	if err != nil {
+		t.Fatalf("ResumeSession() error = %v", err)
+	}
+	if resp.Modes == nil {
+		t.Fatal("ResumeSession().Modes = nil, want non-nil")
+	}
+	if got := resp.Modes.CurrentModeId; got != "" {
+		t.Fatalf("ResumeSession().Modes.CurrentModeId = %q, want empty", got)
 	}
 }
 
@@ -2016,6 +2046,105 @@ func TestPromptStreamsReasoningSummaryThoughtsByDefault(t *testing.T) {
 	}
 }
 
+func TestPromptPublishesCompletedSummaryPartsWithoutTokenStreaming(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	queueNotification(session, "item/started", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"item": map[string]any{
+			"type": "reasoning",
+			"id":   "item-reasoning-1",
+		},
+	})
+	queueNotification(session, "item/reasoning/summaryTextDelta", map[string]any{
+		"threadId":     "thr-1",
+		"turnId":       "turn-1",
+		"itemId":       "item-reasoning-1",
+		"summaryIndex": 0,
+		"delta":        "first summary",
+	})
+	queueNotification(session, "item/reasoning/summaryPartAdded", map[string]any{
+		"threadId":     "thr-1",
+		"turnId":       "turn-1",
+		"itemId":       "item-reasoning-1",
+		"summaryIndex": 1,
+	})
+	queueNotification(session, "item/reasoning/summaryTextDelta", map[string]any{
+		"threadId":     "thr-1",
+		"turnId":       "turn-1",
+		"itemId":       "item-reasoning-1",
+		"summaryIndex": 1,
+		"delta":        "second summary",
+	})
+	queueNotification(session, "item/completed", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"item": map[string]any{
+			"type":    "reasoning",
+			"id":      "item-reasoning-1",
+			"summary": []any{"first summary", "second summary"},
+			"content": []any{"raw ignored"},
+		},
+	})
+	queueNotification(session, "turn/completed", map[string]any{
+		"threadId": "thr-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "completed",
+		},
+	})
+
+	conn := &fakeACPAppConnection{}
+	l := zerolog.Nop()
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &l)
+	opts := Options{}
+	opts.SetReasoningStreaming(false)
+	agent.setBridgeOptions(opts)
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	}); err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+
+	chunks := thoughtChunks(conn.sessionUpdates(newResp.SessionId))
+	if len(chunks) != 2 {
+		t.Fatalf("thought chunk count = %d, want 2: %#v", len(chunks), chunks)
+	}
+	if got := thoughtChunkText(chunks[0]); got != "first summary" {
+		t.Fatalf("first thought text = %q, want first summary", got)
+	}
+	if got := thoughtChunkMetaString(chunks[0], metaReasoningKindKey); got != reasoningKindSummary {
+		t.Fatalf("first thought reasoning kind = %q, want %q", got, reasoningKindSummary)
+	}
+	if got := thoughtChunkMetaInt64(chunks[0], metaSummaryIndexKey); got != 0 {
+		t.Fatalf("first thought summary index = %d, want 0", got)
+	}
+	if got, ok := thoughtChunkMetaBool(chunks[0], metaCompletedKey); !ok || !got {
+		t.Fatalf("first thought completed meta = (%t,%t), want (true,true)", got, ok)
+	}
+	if got := thoughtChunkText(chunks[1]); got != "second summary" {
+		t.Fatalf("second thought text = %q, want second summary", got)
+	}
+	if got := thoughtChunkMetaInt64(chunks[1], metaSummaryIndexKey); got != 1 {
+		t.Fatalf("second thought summary index = %d, want 1", got)
+	}
+	if got, ok := thoughtChunkMetaBool(chunks[1], metaCompletedKey); !ok || !got {
+		t.Fatalf("second thought completed meta = (%t,%t), want (true,true)", got, ok)
+	}
+	if countThoughtText(conn.sessionUpdates(newResp.SessionId), "raw ignored") != 0 {
+		t.Fatalf("unexpected raw reasoning text in summary mode: %#v", chunks)
+	}
+}
+
 func TestPromptFallsBackToCompletedReasoningContentInSummaryMode(t *testing.T) {
 	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
 	queueNotification(session, "item/started", map[string]any{
@@ -3136,6 +3265,51 @@ func TestPromptStopsOnErrorNotificationWithoutRetry(t *testing.T) {
 	}
 }
 
+func TestPromptWarnLogsTerminalErrorNotificationWithoutRetry(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	queueNotification(session, "error", map[string]any{
+		"threadId":  "thr-1",
+		"turnId":    "turn-1",
+		"willRetry": false,
+		"error": map[string]any{
+			"message": "fatal boom",
+			"code":    "quota_exceeded",
+		},
+	})
+
+	conn := &fakeACPAppConnection{}
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs)
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &logger)
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	}); err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+
+	got := logs.String()
+	for _, want := range []string{
+		`"level":"warn"`,
+		`"error_message":"fatal boom"`,
+		`"error_code":"quota_exceeded"`,
+		`"source":"error"`,
+		`prompt completed with terminal error`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("logs missing %q: %s", want, got)
+		}
+	}
+}
+
 func TestPromptMetaIncludesTurnFailureErrorDetails(t *testing.T) {
 	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
 	queueNotification(session, "turn/completed", map[string]any{
@@ -3179,6 +3353,54 @@ func TestPromptMetaIncludesTurnFailureErrorDetails(t *testing.T) {
 	}
 	if got := stringValue(errMeta, "codexErrorInfo"); got != "other" {
 		t.Fatalf("PromptResponse.Meta.error.codexErrorInfo = %q, want %q", got, "other")
+	}
+}
+
+func TestPromptWarnLogsTurnFailureErrorDetails(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	queueNotification(session, "turn/completed", map[string]any{
+		"threadId": "thr-1",
+		"turnId":   "turn-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "failed",
+			"error": map[string]any{
+				"message":        "model not supported",
+				"codexErrorInfo": "other",
+			},
+		},
+	})
+
+	conn := &fakeACPAppConnection{}
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs)
+	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
+		return session, nil
+	}, "agent", codexAppConfig{}, &logger)
+	agent.setConnection(conn)
+
+	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	if _, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: newResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+	}); err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+
+	got := logs.String()
+	for _, want := range []string{
+		`"level":"warn"`,
+		`"error_message":"model not supported"`,
+		`"error_code":"other"`,
+		`"source":"turn/completed"`,
+		`prompt completed with terminal error`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("logs missing %q: %s", want, got)
+		}
 	}
 }
 

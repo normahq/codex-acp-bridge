@@ -78,3 +78,16 @@ func TestCloneMap(t *testing.T) {
 		t.Fatalf("source map after clone mutation = %#v, want %q", got, want)
 	}
 }
+
+func TestOptionsAppConfigIncludesSandbox(t *testing.T) {
+	cfg := Options{Sandbox: " workspace-write "}.appConfig()
+	if got, want := cfg.Sandbox, testSandboxWorkspaceWrite; got != want {
+		t.Fatalf("appConfig().Sandbox = %q, want %q", got, want)
+	}
+}
+
+func TestOptionsValidateRejectsInvalidSandbox(t *testing.T) {
+	if err := (Options{Sandbox: "bad-mode"}).validate(); err == nil {
+		t.Fatal("validate() error = nil, want non-nil")
+	}
+}

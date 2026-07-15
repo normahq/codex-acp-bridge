@@ -67,13 +67,45 @@ func TestCommandExposesOnlyBridgeFlags(t *testing.T) {
 			t.Fatalf("flag %q unexpectedly present", removedFlag)
 		}
 	}
-	for _, expectedFlag := range []string{"name", "message-streaming", "reasoning-streaming", "reasoning-thoughts", "reasoning-summary", "debug"} {
+	for _, expectedFlag := range []string{"name", "message-streaming", "reasoning-streaming", "reasoning-thoughts", "reasoning-summary", "sandbox", "debug"} {
 		if got := cmd.Flags().Lookup(expectedFlag); got == nil {
 			t.Fatalf("flag %q missing", expectedFlag)
 		}
 	}
 	if got := cmd.Commands(); len(got) == 0 {
 		t.Fatal("commands = 0, want version subcommand")
+	}
+}
+
+func TestCommandPassesSandboxFlagToRunProxy(t *testing.T) {
+	origRunProxy := runProxy
+	origInitLogging := initLogging
+	t.Cleanup(func() {
+		runProxy = origRunProxy
+		initLogging = origInitLogging
+	})
+
+	initLogging = func(...logging.OptOptionsSetter) error {
+		return nil
+	}
+
+	var gotOpts codexacpbridge.Options
+	runProxy = func(_ context.Context, _ string, opts codexacpbridge.Options, _ io.Reader, _, _ io.Writer) error {
+		gotOpts = opts
+		return nil
+	}
+
+	cmd := Command()
+	cmd.SetArgs([]string{"--sandbox=workspace-write"})
+	cmd.SetIn(strings.NewReader(""))
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if gotOpts.Sandbox != "workspace-write" {
+		t.Fatalf("Sandbox = %q, want %q", gotOpts.Sandbox, "workspace-write")
 	}
 }
 

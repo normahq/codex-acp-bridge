@@ -28,7 +28,7 @@ codex-acp-bridge --name team-codex
 # Stream app-server agent messages live
 codex-acp-bridge --message-streaming
 
-# Disable live reasoning/thought streaming; completed reasoning still emits aggregated thoughts
+# Disable live reasoning token streaming; completed summary parts still emit incremental thoughts
 codex-acp-bridge --reasoning-streaming=false
 ```
 
@@ -63,7 +63,7 @@ acp-repl -- codex-acp-bridge
   Stream app-server `item/agentMessage/delta` notifications as ACP `agent_message_chunk` updates.
   Default: `false`.
 - `--reasoning-streaming`:
-  Stream app-server reasoning deltas live when enabled. When disabled, suppress reasoning delta streaming but still emit completed reasoning items as aggregated ACP thoughts.
+  Stream app-server reasoning text deltas live when enabled. When disabled, suppress raw/content token deltas and summary token deltas, but keep incremental summary-part thought publication and final completion fallback.
   Default: `true`.
 - `--reasoning-summary`:
   Request app-server reasoning summaries: `auto`, `concise`, `detailed`, or `none`.
@@ -81,7 +81,7 @@ acp-repl -- codex-acp-bridge
   - Otherwise, the bridge process working directory is used.
 - Negotiates app-server notification opt-outs during `initialize`:
   - `--message-streaming=false` opts out `item/agentMessage/delta`.
-  - `--reasoning-streaming=false` opts out `item/reasoning/textDelta`, `item/reasoning/summaryTextDelta`, and `item/reasoning/summaryPartAdded`.
+  - `--reasoning-streaming=false` opts out `item/reasoning/textDelta` only; summary notifications stay enabled when summary thoughts are enabled so completed summary parts can publish incrementally.
   - `--reasoning-thoughts=summary` opts out raw `item/reasoning/textDelta`.
   - `--reasoning-thoughts=content` opts out `item/reasoning/summaryTextDelta` and `item/reasoning/summaryPartAdded`.
   - `--reasoning-thoughts=off` opts out all reasoning delta notifications.
@@ -106,7 +106,7 @@ acp-repl -- codex-acp-bridge
   - streamed message chunks carry `_meta["codex-acp-bridge/itemId"]`, `_meta["codex-acp-bridge/completed"]`, and `_meta["codex-acp-bridge/phase"]`
   - `item/completed` closes the logical message; it does not complete the ACP turn
 - Optional lane-aware reasoning thoughts:
-  - `summary` projects `item/reasoning/summaryTextDelta`
+  - `summary` projects `item/reasoning/summaryTextDelta`; with `--reasoning-streaming=false`, the bridge buffers summary text locally and publishes completed parts on `item/reasoning/summaryPartAdded`
   - `content` projects `item/reasoning/textDelta`
   - `both` projects both lanes and keeps them distinct via `_meta`
   - thought chunks carry `_meta["codex-acp-bridge/itemId"]`, `_meta["codex-acp-bridge/reasoningKind"]`, index metadata, and `_meta["codex-acp-bridge/completed"]`
@@ -158,6 +158,7 @@ Validation and precedence:
 
 - `session/new._meta.sessionId` is rejected; ACP session ids are backend-generated and durable.
 - Unknown `codex` keys are rejected with ACP `invalid_params`.
+- `session/new._meta.codex.sandbox` overrides the bridge `--sandbox` default when both are set.
 - `profile` overrides `config.profile`.
 - `compactPrompt` overrides `config.compact_prompt`.
 - ACP `mcpServers` mapping overrides same-name entries in `config.mcp_servers` (merge semantics; non-overlapping entries are retained).

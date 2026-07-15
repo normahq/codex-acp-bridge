@@ -256,7 +256,7 @@ func TestAppServerInitializeParamsOptOutNotificationMethods(t *testing.T) {
 		}
 	})
 
-	t.Run("message streaming and reasoning final-only opt out all reasoning deltas", func(t *testing.T) {
+	t.Run("message streaming and non-streaming reasoning opt out raw reasoning deltas only", func(t *testing.T) {
 		opts := Options{MessageStreaming: true}
 		opts.SetReasoningStreaming(false)
 		params := appServerInitializeParams("bridge", opts)
@@ -268,11 +268,7 @@ func TestAppServerInitializeParamsOptOutNotificationMethods(t *testing.T) {
 		if !ok {
 			t.Fatalf("optOutNotificationMethods type = %T, want []string", caps["optOutNotificationMethods"])
 		}
-		want := []string{
-			methodReasoningTextDelta,
-			methodReasoningSummaryTextDelta,
-			methodReasoningSummaryPartAdded,
-		}
+		want := []string{methodReasoningTextDelta}
 		if !slices.Equal(methods, want) {
 			t.Fatalf("optOutNotificationMethods = %#v, want %#v", methods, want)
 		}

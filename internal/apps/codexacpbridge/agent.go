@@ -102,11 +102,13 @@ type reasoningLaneState struct {
 	open     bool
 	streamed bool
 	hasText  bool
+	text     string
 }
 
 type reasoningItemState struct {
-	summary reasoningLaneState
-	content reasoningLaneState
+	summary          reasoningLaneState
+	content          reasoningLaneState
+	summaryPublished bool
 }
 
 type planItemState struct {
@@ -355,6 +357,7 @@ func (a *codexACPProxyAgent) NewSession(ctx context.Context, params acp.NewSessi
 			resp.ConfigOptions = configOptions
 		}
 	}
+	resp.Modes = sessionModeState(sessionState.mode)
 	if mcpMeta := a.sessionMCPMeta(sessionID, false); len(mcpMeta) > 0 {
 		resp.Meta = map[string]any{
 			"codex": map[string]any{
@@ -484,6 +487,7 @@ func (a *codexACPProxyAgent) restoreSession(
 		resp.models = modelState
 		resp.configOptions = configOptions
 	}
+	resp.modes = sessionModeState(sessionState.mode)
 	if mcpMeta := a.sessionMCPMeta(sessionID, false); len(mcpMeta) > 0 {
 		resp.meta = map[string]any{
 			"codex": map[string]any{
@@ -497,6 +501,7 @@ func (a *codexACPProxyAgent) restoreSession(
 type sessionRestoreResponse struct {
 	models        *acp.SessionModelState
 	configOptions []acp.SessionConfigOption
+	modes         *acp.SessionModeState
 	meta          map[string]any
 }
 
@@ -505,6 +510,7 @@ func (r sessionRestoreResponse) ResumeResponse() acp.ResumeSessionResponse {
 		ConfigOptions: r.configOptions,
 		Meta:          cloneAnyMap(r.meta),
 		Models:        r.models,
+		Modes:         r.modes,
 	}
 }
 
@@ -630,6 +636,21 @@ func newSessionState(
 		state.reasoningEffort = strings.TrimSpace(*reasoningEffort)
 	}
 	return state
+}
+
+func sessionModeState(mode string) *acp.SessionModeState {
+	currentMode := strings.TrimSpace(mode)
+	availableModes := []acp.SessionMode{}
+	if currentMode != "" {
+		availableModes = append(availableModes, acp.SessionMode{
+			Id:   acp.SessionModeId(currentMode),
+			Name: currentMode,
+		})
+	}
+	return &acp.SessionModeState{
+		AvailableModes: availableModes,
+		CurrentModeId:  acp.SessionModeId(currentMode),
+	}
 }
 
 func (a *codexACPProxyAgent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
@@ -1552,6 +1573,7 @@ func (a *codexACPProxyAgent) handleNotification(
 	case "error":
 		willRetry, ok := boolValue(params, "willRetry")
 		if ok && !willRetry {
+			a.logTerminalPromptError("error", sessionID, threadID, turnID, acp.StopReasonEndTurn, params["error"])
 			return true, acp.StopReasonEndTurn, usageFromTokenNotification(params), params["error"], nil
 		}
 	case "thread/status/changed":
@@ -1575,15 +1597,22 @@ func (a *codexACPProxyAgent) handleNotification(
 		if err := a.sendAgentMessageDelta(ctx, sessionID, itemID, delta); err != nil {
 			return false, "", nil, nil, err
 		}
-	case methodReasoningTextDelta, methodReasoningSummaryTextDelta:
-		if !a.reasoningStreaming || !a.reasoningThoughtsEnabled() {
+	case methodReasoningTextDelta:
+		if !a.reasoningStreaming || !a.reasoningThoughtsIncludeContent() {
+			return false, "", nil, nil, nil
+		}
+		if err := a.handleReasoningDelta(ctx, sessionID, note.Method, params); err != nil {
+			return false, "", nil, nil, err
+		}
+	case methodReasoningSummaryTextDelta:
+		if !a.reasoningThoughtsIncludeSummary() {
 			return false, "", nil, nil, nil
 		}
 		if err := a.handleReasoningDelta(ctx, sessionID, note.Method, params); err != nil {
 			return false, "", nil, nil, err
 		}
 	case methodReasoningSummaryPartAdded:
-		if !a.reasoningStreaming || !a.reasoningThoughtsIncludeSummary() {
+		if !a.reasoningThoughtsIncludeSummary() {
 			return false, "", nil, nil, nil
 		}
 		if err := a.handleReasoningSummaryPartAdded(ctx, sessionID, params); err != nil {
@@ -1887,7 +1916,12 @@ func (a *codexACPProxyAgent) handleNotification(
 		}
 		turn := mapValue(params, "turn")
 		status := stringValue(turn, "status")
-		return true, stopReasonFromTurnStatus(status), usageFromTokenNotification(params), turnErrorMeta(turn, status), nil
+		stopReason := stopReasonFromTurnStatus(status)
+		errorMeta := turnErrorMeta(turn, status)
+		if errorMeta != nil {
+			a.logTerminalPromptError("turn/completed", sessionID, threadID, turnID, stopReason, errorMeta)
+		}
+		return true, stopReason, usageFromTokenNotification(params), errorMeta, nil
 	}
 	return false, "", usage, nil, nil
 }
@@ -2639,6 +2673,55 @@ func turnErrorMeta(turn map[string]any, status string) any {
 	return turn["error"]
 }
 
+func (a *codexACPProxyAgent) logTerminalPromptError(source string, sessionID acp.SessionId, threadID string, turnID string, stopReason acp.StopReason, errorMeta any) {
+	if errorMeta == nil || a.logger == nil {
+		return
+	}
+	event := a.logger.Warn().
+		Str("source", source).
+		Str("session_id", string(sessionID)).
+		Str("thread_id", strings.TrimSpace(threadID)).
+		Str("turn_id", strings.TrimSpace(turnID)).
+		Str("stop_reason", string(stopReason)).
+		Interface("error_meta", cloneJSONValue(errorMeta))
+	if errMap, ok := errorMeta.(map[string]any); ok {
+		if msg := strings.TrimSpace(stringValue(errMap, "message")); msg != "" {
+			event = event.Str("error_message", msg)
+		}
+		if code := strings.TrimSpace(terminalErrorCodeForLog(errMap)); code != "" {
+			event = event.Str("error_code", code)
+		}
+	}
+	event.Msg("prompt completed with terminal error")
+}
+
+func terminalErrorCodeForLog(errMeta map[string]any) string {
+	if len(errMeta) == 0 {
+		return ""
+	}
+	for _, key := range []string{"code", "kind", "type", "codexErrorInfo"} {
+		value, ok := errMeta[key]
+		if !ok {
+			continue
+		}
+		switch typed := value.(type) {
+		case string:
+			if text := strings.TrimSpace(typed); text != "" {
+				return text
+			}
+		case map[string]any:
+			if len(typed) == 1 {
+				for nested := range typed {
+					if text := strings.TrimSpace(nested); text != "" {
+						return text
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
 func findAppServerModel(models []appServerModel, modelID string) (appServerModel, bool) {
 	trimmedModelID := strings.TrimSpace(modelID)
 	if trimmedModelID == "" {
@@ -2879,12 +2962,12 @@ func (a *codexACPProxyAgent) completeAgentMessageState(sessionID acp.SessionId, 
 	return itemState
 }
 
-func (a *codexACPProxyAgent) advanceReasoningLane(sessionID acp.SessionId, itemID string, kind string, index int64, streamed bool) (int64, bool) {
+func (a *codexACPProxyAgent) advanceReasoningLane(sessionID acp.SessionId, itemID string, kind string, index int64, streamed bool) (int64, string, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	state := a.sessions[sessionID]
 	if state == nil {
-		return 0, false
+		return 0, "", false
 	}
 	if state.reasoningItems == nil {
 		state.reasoningItems = make(map[string]reasoningItemState)
@@ -2897,14 +2980,16 @@ func (a *codexACPProxyAgent) advanceReasoningLane(sessionID acp.SessionId, itemI
 	case reasoningKindContent:
 		lane = itemState.content
 	default:
-		return 0, false
+		return 0, "", false
 	}
 	previousIndex := lane.index
+	previousText := lane.text
 	shouldClose := lane.open && lane.index != index && lane.hasText
 	if !lane.open || lane.index != index {
 		lane.index = index
 		lane.open = true
 		lane.hasText = false
+		lane.text = ""
 	}
 	if streamed {
 		lane.streamed = true
@@ -2917,7 +3002,56 @@ func (a *codexACPProxyAgent) advanceReasoningLane(sessionID acp.SessionId, itemI
 		itemState.content = lane
 	}
 	state.reasoningItems[itemID] = itemState
-	return previousIndex, shouldClose
+	return previousIndex, previousText, shouldClose
+}
+
+func (a *codexACPProxyAgent) appendReasoningLaneText(sessionID acp.SessionId, itemID string, kind string, index int64, delta string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	state := a.sessions[sessionID]
+	if state == nil {
+		return
+	}
+	if state.reasoningItems == nil {
+		state.reasoningItems = make(map[string]reasoningItemState)
+	}
+	itemState := state.reasoningItems[itemID]
+	var lane reasoningLaneState
+	switch kind {
+	case reasoningKindSummary:
+		lane = itemState.summary
+	case reasoningKindContent:
+		lane = itemState.content
+	default:
+		return
+	}
+	if !lane.open || lane.index != index {
+		lane.index = index
+		lane.open = true
+		lane.hasText = false
+		lane.text = ""
+	}
+	lane.text += delta
+	lane.hasText = lane.hasText || delta != ""
+	switch kind {
+	case reasoningKindSummary:
+		itemState.summary = lane
+	case reasoningKindContent:
+		itemState.content = lane
+	}
+	state.reasoningItems[itemID] = itemState
+}
+
+func (a *codexACPProxyAgent) markReasoningSummaryPublished(sessionID acp.SessionId, itemID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	state := a.sessions[sessionID]
+	if state == nil || state.reasoningItems == nil {
+		return
+	}
+	itemState := state.reasoningItems[itemID]
+	itemState.summaryPublished = true
+	state.reasoningItems[itemID] = itemState
 }
 
 func (a *codexACPProxyAgent) completeReasoningState(sessionID acp.SessionId, itemID string) reasoningItemState {
@@ -3003,7 +3137,11 @@ func (a *codexACPProxyAgent) handleReasoningDelta(ctx context.Context, sessionID
 	if !ok {
 		return nil
 	}
-	previousIndex, shouldClose := a.advanceReasoningLane(sessionID, itemID, kind, index, true)
+	if !a.reasoningStreaming {
+		a.appendReasoningLaneText(sessionID, itemID, kind, index, delta)
+		return nil
+	}
+	previousIndex, _, shouldClose := a.advanceReasoningLane(sessionID, itemID, kind, index, true)
 	if shouldClose {
 		if err := a.sendReasoningChunk(ctx, sessionID, "", itemID, kind, previousIndex, true); err != nil {
 			return err
@@ -3018,8 +3156,19 @@ func (a *codexACPProxyAgent) handleReasoningSummaryPartAdded(ctx context.Context
 	if itemID == "" || !ok {
 		return nil
 	}
-	previousIndex, shouldClose := a.advanceReasoningLane(sessionID, itemID, reasoningKindSummary, index, false)
+	previousIndex, previousText, shouldClose := a.advanceReasoningLane(sessionID, itemID, reasoningKindSummary, index, false)
 	if !shouldClose {
+		return nil
+	}
+	if !a.reasoningStreaming {
+		text := completedReasoningText([]string{previousText})
+		if text == "" {
+			return nil
+		}
+		if err := a.sendReasoningChunk(ctx, sessionID, text, itemID, reasoningKindSummary, previousIndex, true); err != nil {
+			return err
+		}
+		a.markReasoningSummaryPublished(sessionID, itemID)
 		return nil
 	}
 	return a.sendReasoningChunk(ctx, sessionID, "", itemID, reasoningKindSummary, previousIndex, true)
@@ -3112,14 +3261,22 @@ func (a *codexACPProxyAgent) handleCompletedReasoning(ctx context.Context, sessi
 		return nil
 	}
 	if a.reasoningThoughtsIncludeSummary() {
-		kind := reasoningKindSummary
-		texts := summaryTexts
-		if !hasCompletedReasoningText(texts) && !a.reasoningThoughtsIncludeContent() {
-			kind = reasoningKindContent
-			texts = contentTexts
-		}
-		if err := a.emitCompletedReasoningTexts(ctx, sessionID, itemID, kind, texts); err != nil {
-			return err
+		if state.summaryPublished {
+			if text := completedReasoningText([]string{state.summary.text}); text != "" {
+				if err := a.sendReasoningChunk(ctx, sessionID, text, itemID, reasoningKindSummary, state.summary.index, true); err != nil {
+					return err
+				}
+			}
+		} else {
+			kind := reasoningKindSummary
+			texts := summaryTexts
+			if !hasCompletedReasoningText(texts) && !a.reasoningThoughtsIncludeContent() {
+				kind = reasoningKindContent
+				texts = contentTexts
+			}
+			if err := a.emitCompletedReasoningTexts(ctx, sessionID, itemID, kind, texts); err != nil {
+				return err
+			}
 		}
 	}
 	if a.reasoningThoughtsIncludeContent() {
