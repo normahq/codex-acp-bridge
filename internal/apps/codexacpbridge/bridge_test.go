@@ -8,7 +8,10 @@ import (
 	"testing"
 )
 
-const bridgeAppServerSubcommand = "app-server"
+const (
+	bridgeAppServerBinary     = "codex"
+	bridgeAppServerSubcommand = "app-server"
+)
 
 type appServerSessionSpy struct {
 	initializeResponse appServerInitializeResponse
@@ -126,8 +129,8 @@ func TestBuildCodexAppCommand(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("buildCodexAppCommand() len = %d, want 2", len(got))
 	}
-	if got[0] != "codex" || got[1] != bridgeAppServerSubcommand {
-		t.Fatalf("buildCodexAppCommand() = %#v, want [\"codex\", %q]", got, bridgeAppServerSubcommand)
+	if got[0] != bridgeAppServerBinary || got[1] != bridgeAppServerSubcommand {
+		t.Fatalf("buildCodexAppCommand() = %#v, want [%q, %q]", got, bridgeAppServerBinary, bridgeAppServerSubcommand)
 	}
 }
 
@@ -138,8 +141,8 @@ func TestBuildCodexAppCommandAppendsForwardedArgs(t *testing.T) {
 	if len(got) != 4 {
 		t.Fatalf("buildCodexAppCommand() len = %d, want 4", len(got))
 	}
-	if got[0] != "codex" || got[1] != bridgeAppServerSubcommand || got[2] != "--sandbox=workspace-write" || got[3] != "--search" {
-		t.Fatalf("buildCodexAppCommand() = %#v, want [\"codex\", %q, \"--sandbox=workspace-write\", \"--search\"]", got, bridgeAppServerSubcommand)
+	if got[0] != bridgeAppServerBinary || got[1] != bridgeAppServerSubcommand || got[2] != "--sandbox=workspace-write" || got[3] != "--search" {
+		t.Fatalf("buildCodexAppCommand() = %#v, want [%q, %q, \"--sandbox=workspace-write\", \"--search\"]", got, bridgeAppServerBinary, bridgeAppServerSubcommand)
 	}
 }
 
