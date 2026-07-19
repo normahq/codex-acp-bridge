@@ -119,8 +119,7 @@ func TestCodexACPIntegrationSetModelRoundTrip(t *testing.T) {
 	client, stderr := newCodexACPClient(t, workingDir, bin)
 	_ = mustInitialize(t, client, stderr)
 	sessionResp := mustNewSession(t, client, stderr, workingDir)
-	models := requireSessionModels(t, sessionResp, stderr.String())
-	modelID := firstAvailableModelID(models)
+	modelID := requireCurrentModelConfigValue(t, sessionResp, stderr.String())
 
 	ctx, cancel := context.WithTimeout(context.Background(), integrationTestTimeout)
 	defer cancel()
@@ -137,10 +136,9 @@ func TestCodexACPIntegrationSetModelUnknownModelPolicy(t *testing.T) {
 	client, stderr := newCodexACPClient(t, workingDir, bin)
 	_ = mustInitialize(t, client, stderr)
 	sessionResp := mustNewSession(t, client, stderr, workingDir)
-	models := requireSessionModels(t, sessionResp, stderr.String())
 
 	invalidModel := fmt.Sprintf("norma-invalid-model-%d", time.Now().UnixNano())
-	if invalidModel == firstAvailableModelID(models) {
+	if invalidModel == requireCurrentModelConfigValue(t, sessionResp, stderr.String()) {
 		invalidModel += "-x"
 	}
 
@@ -281,48 +279,42 @@ func maybeSkipCodexIntegration(t *testing.T, err error, stderr string) {
 	}
 }
 
-func requireSessionModels(t *testing.T, resp acp.NewSessionResponse, stderr string) *acp.SessionModelState {
+func requireCurrentModelConfigValue(t *testing.T, resp acp.NewSessionResponse, stderr string) string {
 	t.Helper()
 
 	if strings.TrimSpace(string(resp.SessionId)) == "" {
 		failWithDetails(t, "session/new returned empty session id", nil, stderr)
 	}
-	if resp.Models == nil {
-		failWithDetails(t, "session/new returned nil models", nil, stderr)
-	}
-	if len(resp.Models.AvailableModels) == 0 {
-		failWithDetails(t, "session/new returned empty availableModels", nil, stderr)
-	}
-
-	current := strings.TrimSpace(string(resp.Models.CurrentModelId))
-	if current == "" {
-		failWithDetails(t, "session/new returned empty currentModelId", nil, stderr)
-	}
-
-	foundCurrent := false
-	for i, model := range resp.Models.AvailableModels {
-		if strings.TrimSpace(string(model.ModelId)) == "" {
-			t.Fatalf("session/new availableModels[%d].modelId is empty", i)
+	for _, option := range resp.ConfigOptions {
+		if option.Select == nil {
+			continue
 		}
-		if strings.TrimSpace(model.Name) == "" {
-			t.Fatalf("session/new availableModels[%d].name is empty", i)
+		if strings.TrimSpace(string(option.Select.Id)) != "model" {
+			continue
 		}
-		if string(model.ModelId) == current {
-			foundCurrent = true
+		current := strings.TrimSpace(string(option.Select.CurrentValue))
+		if current == "" {
+			failWithDetails(t, "session/new returned empty model config currentValue", nil, stderr)
 		}
+		foundCurrent := false
+		for i, model := range option.Select.Options {
+			if strings.TrimSpace(string(model.Value)) == "" {
+				t.Fatalf("session/new model option[%d].value is empty", i)
+			}
+			if strings.TrimSpace(model.Name) == "" {
+				t.Fatalf("session/new model option[%d].name is empty", i)
+			}
+			if string(model.Value) == current {
+				foundCurrent = true
+			}
+		}
+		if !foundCurrent {
+			t.Fatalf("session/new model currentValue %q not present in options", current)
+		}
+		return current
 	}
-	if !foundCurrent {
-		t.Fatalf("session/new currentModelId %q not present in availableModels", current)
-	}
-
-	return resp.Models
-}
-
-func firstAvailableModelID(models *acp.SessionModelState) string {
-	if models == nil || len(models.AvailableModels) == 0 {
-		return ""
-	}
-	return string(models.AvailableModels[0].ModelId)
+	failWithDetails(t, "session/new returned no model config option", nil, stderr)
+	return ""
 }
 
 func assertInvalidParamsError(t *testing.T, err error) {

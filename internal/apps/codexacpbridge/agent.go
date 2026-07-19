@@ -345,17 +345,14 @@ func (a *codexACPProxyAgent) NewSession(ctx context.Context, params acp.NewSessi
 	}
 
 	resp := acp.NewSessionResponse{SessionId: sessionID}
-	modelState, configOptions, err := a.buildSessionModelConfigState(ctx, sessionID)
+	configOptions, err := a.buildSessionModelConfigState(ctx, sessionID)
 	if err != nil {
 		a.logger.Warn().
 			Err(err).
 			Str("session_id", string(sessionID)).
 			Msg("model/list unavailable; continuing without session model config")
-	} else if modelState != nil {
-		resp.Models = modelState
-		if len(configOptions) > 0 {
-			resp.ConfigOptions = configOptions
-		}
+	} else if len(configOptions) > 0 {
+		resp.ConfigOptions = configOptions
 	}
 	resp.Modes = sessionModeState(sessionState.mode)
 	if mcpMeta := a.sessionMCPMeta(sessionID, false); len(mcpMeta) > 0 {
@@ -474,7 +471,7 @@ func (a *codexACPProxyAgent) restoreSession(
 		return sessionRestoreResponse{}, err
 	}
 
-	modelState, configOptions, err := a.buildSessionModelConfigState(ctx, sessionID)
+	configOptions, err := a.buildSessionModelConfigState(ctx, sessionID)
 	if err != nil {
 		a.logger.Warn().
 			Err(err).
@@ -483,8 +480,7 @@ func (a *codexACPProxyAgent) restoreSession(
 	}
 
 	resp := sessionRestoreResponse{}
-	if modelState != nil {
-		resp.models = modelState
+	if len(configOptions) > 0 {
 		resp.configOptions = configOptions
 	}
 	resp.modes = sessionModeState(sessionState.mode)
@@ -499,7 +495,6 @@ func (a *codexACPProxyAgent) restoreSession(
 }
 
 type sessionRestoreResponse struct {
-	models        *acp.SessionModelState
 	configOptions []acp.SessionConfigOption
 	modes         *acp.SessionModeState
 	meta          map[string]any
@@ -509,7 +504,6 @@ func (r sessionRestoreResponse) ResumeResponse() acp.ResumeSessionResponse {
 	return acp.ResumeSessionResponse{
 		ConfigOptions: r.configOptions,
 		Meta:          cloneAnyMap(r.meta),
-		Models:        r.models,
 		Modes:         r.modes,
 	}
 }
@@ -838,31 +832,6 @@ func (a *codexACPProxyAgent) SetSessionMode(_ context.Context, params acp.SetSes
 	return acp.SetSessionModeResponse{}, nil
 }
 
-func (a *codexACPProxyAgent) UnstableSetSessionModel(
-	ctx context.Context,
-	params acp.UnstableSetSessionModelRequest,
-) (acp.UnstableSetSessionModelResponse, error) {
-	if err := a.rejectIfShuttingDown(); err != nil {
-		return acp.UnstableSetSessionModelResponse{}, err
-	}
-	nextModel := strings.TrimSpace(string(params.ModelId))
-	if nextModel == "" {
-		return acp.UnstableSetSessionModelResponse{}, acp.NewInvalidParams("session model is not supported")
-	}
-	configOptions, err := a.setSessionModel(ctx, params.SessionId, nextModel)
-	if err != nil {
-		return acp.UnstableSetSessionModelResponse{}, err
-	}
-	if len(configOptions) > 0 {
-		_ = a.sendUpdate(ctx, params.SessionId, acp.SessionUpdate{
-			ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{
-				ConfigOptions: configOptions,
-			},
-		})
-	}
-	return acp.UnstableSetSessionModelResponse{}, nil
-}
-
 func (a *codexACPProxyAgent) ensureSessionBackend(ctx context.Context, sessionID acp.SessionId) error {
 	a.mu.Lock()
 	state, ok := a.sessions[sessionID]
@@ -968,32 +937,32 @@ func (a *codexACPProxyAgent) ensureSessionThread(ctx context.Context, sessionID 
 func (a *codexACPProxyAgent) buildSessionModelConfigState(
 	ctx context.Context,
 	sessionID acp.SessionId,
-) (*acp.SessionModelState, []acp.SessionConfigOption, error) {
+) ([]acp.SessionConfigOption, error) {
 	a.mu.Lock()
 	state, ok := a.sessions[sessionID]
 	if !ok {
 		a.mu.Unlock()
-		return nil, nil, acp.NewInvalidParams("session not found")
+		return nil, acp.NewInvalidParams("session not found")
 	}
 	backend := state.backend
 	currentModelID := strings.TrimSpace(state.model)
 	currentReasoningEffort := strings.TrimSpace(state.reasoningEffort)
 	a.mu.Unlock()
 	if backend == nil {
-		return nil, nil, errors.New(errSessionBackendUnavailable)
+		return nil, errors.New(errSessionBackendUnavailable)
 	}
 
 	models, err := listAppServerModels(ctx, backend)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	modelState, configOptions := a.buildSessionModelConfigStateFromModels(
+	configOptions := a.buildSessionModelConfigStateFromModels(
 		sessionID,
 		models,
 		currentModelID,
 		currentReasoningEffort,
 	)
-	return modelState, configOptions, nil
+	return configOptions, nil
 }
 
 func (a *codexACPProxyAgent) buildSessionModelConfigStateFromModels(
@@ -1001,47 +970,32 @@ func (a *codexACPProxyAgent) buildSessionModelConfigStateFromModels(
 	models []appServerModel,
 	currentModelID string,
 	currentReasoningEffort string,
-) (*acp.SessionModelState, []acp.SessionConfigOption) {
+) []acp.SessionConfigOption {
 	if len(models) == 0 {
-		return nil, nil
+		return nil
 	}
 
-	availableModels := make([]acp.ModelInfo, 0, len(models))
 	defaultModelID := ""
 	for _, model := range models {
 		modelID := strings.TrimSpace(model.ID)
 		if modelID == "" {
 			continue
 		}
-		modelName := strings.TrimSpace(model.DisplayName)
-		if modelName == "" {
-			modelName = modelID
-		}
-
-		info := acp.ModelInfo{
-			ModelId: acp.ModelId(modelID),
-			Name:    modelName,
-		}
-		if model.Description != nil {
-			description := strings.TrimSpace(*model.Description)
-			if description != "" {
-				info.Description = &description
-			}
-		}
-		availableModels = append(availableModels, info)
 		if model.IsDefault && defaultModelID == "" {
 			defaultModelID = modelID
 		}
 	}
-	if len(availableModels) == 0 {
-		return nil, nil
+	if defaultModelID == "" && currentModelID == "" {
+		for _, model := range models {
+			if modelID := strings.TrimSpace(model.ID); modelID != "" {
+				defaultModelID = modelID
+				break
+			}
+		}
 	}
 
 	if currentModelID == "" {
 		currentModelID = defaultModelID
-		if currentModelID == "" {
-			currentModelID = string(availableModels[0].ModelId)
-		}
 	}
 
 	var configOptions []acp.SessionConfigOption
@@ -1069,10 +1023,7 @@ func (a *codexACPProxyAgent) buildSessionModelConfigStateFromModels(
 		}
 	}
 
-	return &acp.SessionModelState{
-		CurrentModelId:  acp.ModelId(currentModelID),
-		AvailableModels: availableModels,
-	}, configOptions
+	return configOptions
 }
 
 func (a *codexACPProxyAgent) setSessionModel(
@@ -1133,7 +1084,7 @@ func (a *codexACPProxyAgent) setSessionModel(
 		return nil, err
 	}
 
-	_, configOptions := a.buildSessionModelConfigStateFromModels(
+	configOptions := a.buildSessionModelConfigStateFromModels(
 		sessionID,
 		models,
 		selectedModelID,
@@ -1200,7 +1151,7 @@ func (a *codexACPProxyAgent) setSessionReasoningEffort(
 		return nil, err
 	}
 
-	_, configOptions := a.buildSessionModelConfigStateFromModels(sessionID, models, currentModelID, selectedEffort)
+	configOptions := a.buildSessionModelConfigStateFromModels(sessionID, models, currentModelID, selectedEffort)
 	return configOptions, nil
 }
 

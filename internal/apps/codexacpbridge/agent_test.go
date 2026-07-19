@@ -378,11 +378,14 @@ func TestSessionModeIsStoredButNotForwardedToBackendPayloads(t *testing.T) {
 		t.Fatalf("SetSessionMode() error = %v", err)
 	}
 
-	if _, err := agent.UnstableSetSessionModel(context.Background(), acp.UnstableSetSessionModelRequest{
-		SessionId: newResp.SessionId,
-		ModelId:   acp.UnstableModelId(testModelGPT55),
+	if _, err := agent.SetSessionConfigOption(context.Background(), acp.SetSessionConfigOptionRequest{
+		ValueId: &acp.SetSessionConfigOptionValueId{
+			SessionId: newResp.SessionId,
+			ConfigId:  acp.SessionConfigId("model"),
+			Value:     acp.SessionConfigValueId(testModelGPT55),
+		},
 	}); err != nil {
-		t.Fatalf("UnstableSetSessionModel() error = %v", err)
+		t.Fatalf("SetSessionConfigOption() error = %v", err)
 	}
 	settingsUpdates := session.settingsUpdateParamsSnapshot()
 	if len(settingsUpdates) != 1 {
@@ -449,19 +452,22 @@ func TestSetSessionModelRejectsUnadvertisedModelAndKeepsPreviousModel(t *testing
 		t.Fatalf("NewSession() error = %v", err)
 	}
 
-	_, err = agent.UnstableSetSessionModel(context.Background(), acp.UnstableSetSessionModelRequest{
-		SessionId: newResp.SessionId,
-		ModelId:   acp.UnstableModelId("gpt-5.3-codex"),
+	_, err = agent.SetSessionConfigOption(context.Background(), acp.SetSessionConfigOptionRequest{
+		ValueId: &acp.SetSessionConfigOptionValueId{
+			SessionId: newResp.SessionId,
+			ConfigId:  acp.SessionConfigId("model"),
+			Value:     acp.SessionConfigValueId("gpt-5.3-codex"),
+		},
 	})
 	if err == nil {
-		t.Fatal("UnstableSetSessionModel() error = nil, want invalid params error")
+		t.Fatal("SetSessionConfigOption() error = nil, want invalid params error")
 	}
 	reqErr := &acp.RequestError{}
 	if !errors.As(err, &reqErr) {
-		t.Fatalf("UnstableSetSessionModel() error type = %T, want *acp.RequestError", err)
+		t.Fatalf("SetSessionConfigOption() error type = %T, want *acp.RequestError", err)
 	}
 	if reqErr.Code != -32602 {
-		t.Fatalf("UnstableSetSessionModel() request error code = %d, want -32602", reqErr.Code)
+		t.Fatalf("SetSessionConfigOption() request error code = %d, want -32602", reqErr.Code)
 	}
 	if got := len(session.settingsUpdateParamsSnapshot()); got != 0 {
 		t.Fatalf("thread/settings/update calls = %d, want 0", got)
@@ -591,7 +597,7 @@ func TestPromptRejectsAudioContentBlock(t *testing.T) {
 	}
 }
 
-func TestNewSessionIncludesModelsFromModelList(t *testing.T) {
+func TestNewSessionIncludesModelConfigOptionsFromModelList(t *testing.T) {
 	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
 	session.modelListResponses = []appServerModelListResponse{
 		{
@@ -613,18 +619,6 @@ func TestNewSessionIncludesModelsFromModelList(t *testing.T) {
 	resp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
 	if err != nil {
 		t.Fatalf("NewSession() error = %v", err)
-	}
-	if resp.Models == nil {
-		t.Fatal("NewSession().Models = nil, want non-nil")
-	}
-	if got := resp.Models.CurrentModelId; got != acp.ModelId("gpt-5.4") {
-		t.Fatalf("current model = %q, want %q", got, "gpt-5.4")
-	}
-	if got := len(resp.Models.AvailableModels); got != 2 {
-		t.Fatalf("available models len = %d, want 2", got)
-	}
-	if got := string(resp.Models.AvailableModels[0].ModelId); got != "gpt-5.4" {
-		t.Fatalf("available models[0].modelId = %q, want %q", got, "gpt-5.4")
 	}
 	option := requireModelOption(t, resp.ConfigOptions)
 	if got := option.CurrentValue; got != acp.SessionConfigValueId("gpt-5.4") {
@@ -1282,14 +1276,9 @@ func TestNewSessionModelListPaginationAndThreadModelPrecedence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession() error = %v", err)
 	}
-	if resp.Models == nil {
-		t.Fatal("NewSession().Models = nil, want non-nil")
-	}
-	if got := resp.Models.CurrentModelId; got != acp.ModelId("gpt-5.4-mini") {
-		t.Fatalf("current model = %q, want %q", got, "gpt-5.4-mini")
-	}
-	if got := len(resp.Models.AvailableModels); got != 2 {
-		t.Fatalf("available models len = %d, want 2", got)
+	option := requireModelOption(t, resp.ConfigOptions)
+	if got := option.CurrentValue; got != acp.SessionConfigValueId("gpt-5.4-mini") {
+		t.Fatalf("model config current value = %q, want %q", got, "gpt-5.4-mini")
 	}
 	if got := len(session.modelListParamsSnapshot()); got != 2 {
 		t.Fatalf("model/list calls = %d, want 2", got)
@@ -1319,11 +1308,9 @@ func TestNewSessionNormalizesUnsupportedThreadModelToAdvertisedDefault(t *testin
 	if err != nil {
 		t.Fatalf("NewSession() error = %v", err)
 	}
-	if resp.Models == nil {
-		t.Fatal("NewSession().Models = nil, want non-nil")
-	}
-	if got := resp.Models.CurrentModelId; got != acp.ModelId(testModelGPT54) {
-		t.Fatalf("current model = %q, want %q", got, testModelGPT54)
+	option := requireModelOption(t, resp.ConfigOptions)
+	if got := option.CurrentValue; got != acp.SessionConfigValueId(testModelGPT54) {
+		t.Fatalf("model config current value = %q, want %q", got, testModelGPT54)
 	}
 }
 
@@ -1345,8 +1332,8 @@ func TestNewSessionContinuesWhenModelListFails(t *testing.T) {
 	if got := strings.TrimSpace(string(resp.SessionId)); got == "" {
 		t.Fatal("session id = empty, want non-empty")
 	}
-	if resp.Models != nil {
-		t.Fatalf("NewSession().Models = %#v, want nil on model/list error", resp.Models)
+	if len(resp.ConfigOptions) != 0 {
+		t.Fatalf("NewSession().ConfigOptions = %#v, want empty on model/list error", resp.ConfigOptions)
 	}
 }
 
@@ -3618,11 +3605,14 @@ func TestShuttingDownRejectsNewACPRequests(t *testing.T) {
 	} else {
 		assertShutdownError(t, err, errBridgeShuttingDown)
 	}
-	if _, err := agent.UnstableSetSessionModel(context.Background(), acp.UnstableSetSessionModelRequest{
-		SessionId: newResp.SessionId,
-		ModelId:   acp.UnstableModelId("gpt-5.4"),
+	if _, err := agent.SetSessionConfigOption(context.Background(), acp.SetSessionConfigOptionRequest{
+		ValueId: &acp.SetSessionConfigOptionValueId{
+			SessionId: newResp.SessionId,
+			ConfigId:  acp.SessionConfigId("model"),
+			Value:     acp.SessionConfigValueId("gpt-5.4"),
+		},
 	}); err == nil {
-		t.Fatal("UnstableSetSessionModel() error = nil, want shutdown error")
+		t.Fatal("SetSessionConfigOption() error = nil, want shutdown error")
 	} else {
 		assertShutdownError(t, err, errBridgeShuttingDown)
 	}
