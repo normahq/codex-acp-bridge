@@ -79,7 +79,7 @@ Common flags:
 - `--reasoning-streaming`: stream Codex reasoning text deltas live; when disabled, raw/content token deltas stay off, while summary thoughts still publish incrementally on completed summary parts. Default: `true`.
 - `--reasoning-summary`: app-server reasoning summary level to request: `auto`, `concise`, `detailed`, or `none`. Default: `auto`.
 - `--reasoning-thoughts`: reasoning lane projected as ACP thoughts: `off`, `summary`, `content`, or `both`. Default: `summary`; when no summary is available, completed raw content is emitted as a fallback thought.
-- `--sandbox`: default Codex sandbox mode for sessions that do not set `_meta.codex.sandbox`: `read-only`, `workspace-write`, or `danger-full-access`.
+- `--codex-args`: repeatable argument forwarded to `codex app-server` unchanged. Example: `--codex-args=--sandbox=workspace-write`.
 - `--debug`: enable debug logging.
 
 Examples:
@@ -90,7 +90,7 @@ codex-acp-bridge --message-streaming
 codex-acp-bridge --reasoning-thoughts=both
 codex-acp-bridge --reasoning-summary=detailed
 codex-acp-bridge --reasoning-streaming=false
-codex-acp-bridge --sandbox=workspace-write
+codex-acp-bridge --codex-args=--sandbox=workspace-write
 codex-acp-bridge --debug
 ```
 

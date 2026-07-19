@@ -67,7 +67,10 @@ func TestCommandExposesOnlyBridgeFlags(t *testing.T) {
 			t.Fatalf("flag %q unexpectedly present", removedFlag)
 		}
 	}
-	for _, expectedFlag := range []string{"name", "message-streaming", "reasoning-streaming", "reasoning-thoughts", "reasoning-summary", "sandbox", "debug"} {
+	if got := cmd.Flags().Lookup("sandbox"); got != nil {
+		t.Fatal("flag \"sandbox\" unexpectedly present")
+	}
+	for _, expectedFlag := range []string{"name", "message-streaming", "reasoning-streaming", "reasoning-thoughts", "reasoning-summary", "codex-args", "debug"} {
 		if got := cmd.Flags().Lookup(expectedFlag); got == nil {
 			t.Fatalf("flag %q missing", expectedFlag)
 		}
@@ -77,7 +80,7 @@ func TestCommandExposesOnlyBridgeFlags(t *testing.T) {
 	}
 }
 
-func TestCommandPassesSandboxFlagToRunProxy(t *testing.T) {
+func TestCommandPassesCodexArgsToRunProxy(t *testing.T) {
 	origRunProxy := runProxy
 	origInitLogging := initLogging
 	t.Cleanup(func() {
@@ -96,7 +99,7 @@ func TestCommandPassesSandboxFlagToRunProxy(t *testing.T) {
 	}
 
 	cmd := New()
-	cmd.SetArgs([]string{"--sandbox=workspace-write"})
+	cmd.SetArgs([]string{"--codex-args=--sandbox=workspace-write", "--codex-args=--search"})
 	cmd.SetIn(strings.NewReader(""))
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
@@ -104,8 +107,14 @@ func TestCommandPassesSandboxFlagToRunProxy(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if gotOpts.Sandbox != "workspace-write" {
-		t.Fatalf("Sandbox = %q, want %q", gotOpts.Sandbox, "workspace-write")
+	if len(gotOpts.CodexArgs) != 2 {
+		t.Fatalf("CodexArgs len = %d, want 2", len(gotOpts.CodexArgs))
+	}
+	if gotOpts.CodexArgs[0] != "--sandbox=workspace-write" {
+		t.Fatalf("CodexArgs[0] = %q, want %q", gotOpts.CodexArgs[0], "--sandbox=workspace-write")
+	}
+	if gotOpts.CodexArgs[1] != "--search" {
+		t.Fatalf("CodexArgs[1] = %q, want %q", gotOpts.CodexArgs[1], "--search")
 	}
 }
 

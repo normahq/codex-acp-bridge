@@ -79,15 +79,9 @@ func TestCloneMap(t *testing.T) {
 	}
 }
 
-func TestOptionsAppConfigIncludesSandbox(t *testing.T) {
-	cfg := Options{Sandbox: " workspace-write "}.appConfig()
-	if got, want := cfg.Sandbox, testSandboxWorkspaceWrite; got != want {
-		t.Fatalf("appConfig().Sandbox = %q, want %q", got, want)
-	}
-}
-
-func TestOptionsValidateRejectsInvalidSandbox(t *testing.T) {
-	if err := (Options{Sandbox: "bad-mode"}).validate(); err == nil {
-		t.Fatal("validate() error = nil, want non-nil")
+func TestOptionsAppConfigEmptyByDefault(t *testing.T) {
+	cfg := Options{}.appConfig()
+	if got := cfg.Sandbox; got != "" {
+		t.Fatalf("appConfig().Sandbox = %q, want empty", got)
 	}
 }

@@ -16,8 +16,11 @@ func TestCommandDelegatesToPublicCobraCommand(t *testing.T) {
 	if got.Short != want.Short {
 		t.Fatalf("Short = %q, want %q", got.Short, want.Short)
 	}
-	if got.Flags().Lookup("sandbox") == nil {
-		t.Fatal("sandbox flag missing")
+	if got.Flags().Lookup("sandbox") != nil {
+		t.Fatal("sandbox flag unexpectedly present")
+	}
+	if got.Flags().Lookup("codex-args") == nil {
+		t.Fatal("codex-args flag missing")
 	}
 	if got.Commands() == nil || len(got.Commands()) == 0 {
 		t.Fatal("subcommands missing")

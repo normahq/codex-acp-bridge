@@ -71,6 +71,9 @@ acp-repl -- codex-acp-bridge
 - `--reasoning-thoughts`:
   Select which reasoning lane is projected as ACP thoughts: `off`, `summary`, `content`, or `both`.
   Default: `summary`. If app-server completes a reasoning item with no summary text but with raw content, summary mode emits that completed content as a fallback thought.
+- `--codex-args`:
+  Repeatable argument forwarded to `codex app-server` unchanged.
+  Example: `--codex-args=--sandbox=workspace-write`.
 - `--debug`:
   Enable debug logging for the bridge process.
 
@@ -158,7 +161,6 @@ Validation and precedence:
 
 - `session/new._meta.sessionId` is rejected; ACP session ids are backend-generated and durable.
 - Unknown `codex` keys are rejected with ACP `invalid_params`.
-- `session/new._meta.codex.sandbox` overrides the bridge `--sandbox` default when both are set.
 - `profile` overrides `config.profile`.
 - `compactPrompt` overrides `config.compact_prompt`.
 - ACP `mcpServers` mapping overrides same-name entries in `config.mcp_servers` (merge semantics; non-overlapping entries are retained).

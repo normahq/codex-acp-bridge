@@ -131,6 +131,18 @@ func TestBuildCodexAppCommand(t *testing.T) {
 	}
 }
 
+func TestBuildCodexAppCommandAppendsForwardedArgs(t *testing.T) {
+	got := buildCodexAppCommand(Options{
+		CodexArgs: []string{"--sandbox=workspace-write", "--search"},
+	})
+	if len(got) != 4 {
+		t.Fatalf("buildCodexAppCommand() len = %d, want 4", len(got))
+	}
+	if got[0] != "codex" || got[1] != bridgeAppServerSubcommand || got[2] != "--sandbox=workspace-write" || got[3] != "--search" {
+		t.Fatalf("buildCodexAppCommand() = %#v, want [\"codex\", %q, \"--sandbox=workspace-write\", \"--search\"]", got, bridgeAppServerSubcommand)
+	}
+}
+
 func TestValidateAppServerFactoryReturnsIdentityAndFinalizesBackend(t *testing.T) {
 	t.Parallel()
 

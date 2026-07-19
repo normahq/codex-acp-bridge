@@ -61,7 +61,7 @@ func New() *cobra.Command {
 	cmd.Flags().BoolVar(&reasoningStreaming, "reasoning-streaming", true, "stream app-server reasoning deltas as ACP agent_thought_chunk updates")
 	cmd.Flags().StringVar(&reasoningThoughts, "reasoning-thoughts", reasoningThoughts, "reasoning thought lane to project: off, summary, content, or both")
 	cmd.Flags().StringVar(&reasoningSummary, "reasoning-summary", reasoningSummary, "app-server reasoning summary level to request: auto, concise, detailed, or none")
-	cmd.Flags().StringVar(&opts.Sandbox, "sandbox", "", "default Codex sandbox mode: read-only, workspace-write, or danger-full-access")
+	cmd.Flags().StringArrayVar(&opts.CodexArgs, "codex-args", nil, "repeatable argument forwarded to `codex app-server` unchanged")
 	cmd.Flags().BoolVar(&debugLogs, "debug", false, "enable debug logging")
 	cmd.Long = "Run the Codex bridge backend and expose it as an ACP agent over stdio. Configure per-session Codex behavior using ACP session/new _meta.codex."
 	//nolint:dupword
@@ -72,7 +72,7 @@ func New() *cobra.Command {
   codex-acp-bridge --reasoning-thoughts=both
   codex-acp-bridge --reasoning-summary=detailed
   codex-acp-bridge --reasoning-streaming=false
-  codex-acp-bridge --sandbox=workspace-write
+  codex-acp-bridge --codex-args=--sandbox=workspace-write
   codex-acp-bridge --debug`
 	cmd.AddCommand(versionCommand())
 	return cmd

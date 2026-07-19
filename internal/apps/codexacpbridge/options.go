@@ -6,6 +6,11 @@ import (
 )
 
 var (
+	validCodexSandboxModes = map[string]struct{}{
+		"read-only":          {},
+		"workspace-write":    {},
+		"danger-full-access": {},
+	}
 	validCodexApprovalPolicies = map[string]struct{}{
 		"untrusted":  {},
 		"on-failure": {},
@@ -24,11 +29,6 @@ var (
 	validCodexServiceTiers = map[string]struct{}{
 		"fast": {},
 		"flex": {},
-	}
-	validCodexSandboxModes = map[string]struct{}{
-		"read-only":          {},
-		"workspace-write":    {},
-		"danger-full-access": {},
 	}
 	validReasoningThoughtModes = map[string]struct{}{
 		reasoningThoughtsOff:     {},
@@ -64,7 +64,7 @@ type Options struct {
 	ReasoningStreaming bool
 	ReasoningThoughts  string
 	ReasoningSummary   string
-	Sandbox            string
+	CodexArgs          []string
 
 	reasoningStreamingConfigured bool
 }
@@ -105,9 +105,7 @@ func (c codexAppConfig) clone() codexAppConfig {
 }
 
 func (o Options) appConfig() codexAppConfig {
-	return codexAppConfig{
-		Sandbox: strings.TrimSpace(o.Sandbox),
-	}
+	return codexAppConfig{}
 }
 
 func (o *Options) SetReasoningStreaming(enabled bool) {
@@ -168,9 +166,6 @@ func (o Options) validate() error {
 		return err
 	}
 	if err := validateEnumValue("reasoning summary", o.reasoningSummaryMode(), validReasoningSummaries); err != nil {
-		return err
-	}
-	if err := validateEnumValue("codex sandbox", o.Sandbox, validCodexSandboxModes); err != nil {
 		return err
 	}
 	return nil
