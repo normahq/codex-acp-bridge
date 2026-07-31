@@ -44,6 +44,54 @@ type fakeCodexHelperEnvelope struct {
 	Params json.RawMessage `json:"params,omitempty"`
 }
 
+func TestBridgeIntegrationDeferredBackendInitializesWithoutCodex(t *testing.T) {
+	workingDir := integrationWorkingDir(t)
+	binPath := buildIntegrationBridgeBinary(t, workingDir)
+	isolatedDir := t.TempDir()
+
+	var stderr bytes.Buffer
+	client, err := newIntegrationACPClient(context.Background(), integrationACPClientConfig{
+		Command:    []string{binPath, "--defer-backend"},
+		WorkingDir: workingDir,
+		Stderr:     &stderr,
+		Env: []string{
+			"HOME=" + isolatedDir,
+			"PATH=" + isolatedDir,
+		},
+	})
+	if err != nil {
+		t.Fatalf("start bridge client error = %v | stderr=%s", err, strings.TrimSpace(stderr.String()))
+	}
+	t.Cleanup(func() {
+		_ = client.Close()
+	})
+
+	initResponse := helperMustInitialize(t, client, &stderr)
+	if got, want := len(initResponse.AuthMethods), 1; got != want {
+		t.Fatalf("Initialize().AuthMethods length = %d, want %d", got, want)
+	}
+	if auth := initResponse.AuthMethods[0].Terminal; auth == nil || auth.Type != "terminal" || auth.Id != "codex-login" {
+		t.Fatalf("Initialize().AuthMethods[0] = %#v, want codex-login terminal auth", initResponse.AuthMethods[0])
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), helperIntegrationTestTimeout)
+	defer cancel()
+	_, err = client.NewSession(ctx, workingDir, nil)
+	if err == nil {
+		t.Fatal("NewSession() error = nil, want missing Codex error")
+	}
+	if !strings.Contains(err.Error(), "executable file not found") {
+		t.Fatalf("NewSession() error = %q, want missing Codex context | stderr=%s", err, strings.TrimSpace(stderr.String()))
+	}
+
+	if err := client.CloseStdin(); err != nil {
+		t.Fatalf("CloseStdin() error = %v", err)
+	}
+	if err := waitForIntegrationClientExit(t, client); err != nil {
+		t.Fatalf("bridge exit error = %v | stderr=%s", err, strings.TrimSpace(stderr.String()))
+	}
+}
+
 func TestBridgeIntegrationSIGINTShutsDownLiveSessionBackend(t *testing.T) {
 	workingDir := integrationWorkingDir(t)
 	binPath := buildIntegrationBridgeBinary(t, workingDir)
@@ -246,7 +294,7 @@ func installFakeCodexScript(t *testing.T) string {
 	return dir
 }
 
-func helperMustInitialize(t *testing.T, client *integrationACPClient, stderr *bytes.Buffer) {
+func helperMustInitialize(t *testing.T, client *integrationACPClient, stderr *bytes.Buffer) acp.InitializeResponse {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), helperIntegrationTestTimeout)
@@ -259,6 +307,7 @@ func helperMustInitialize(t *testing.T, client *integrationACPClient, stderr *by
 	if resp.ProtocolVersion != acp.ProtocolVersion(acp.ProtocolVersionNumber) {
 		t.Fatalf("Initialize().ProtocolVersion = %d, want %d", resp.ProtocolVersion, acp.ProtocolVersionNumber)
 	}
+	return resp
 }
 
 func helperMustNewSession(

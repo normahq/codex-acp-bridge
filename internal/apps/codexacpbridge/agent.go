@@ -192,8 +192,20 @@ func (a *codexACPProxyAgent) setAgentVersion(version string) {
 	a.agentVersion = next
 }
 
-func (a *codexACPProxyAgent) Authenticate(_ context.Context, _ acp.AuthenticateRequest) (acp.AuthenticateResponse, error) {
-	return acp.AuthenticateResponse{}, nil
+const codexLoginAuthMethodID = "codex-login"
+
+func (a *codexACPProxyAgent) Authenticate(
+	_ context.Context,
+	params acp.AuthenticateRequest,
+) (acp.AuthenticateResponse, error) {
+	reason := "unknown authentication method"
+	if params.MethodId == codexLoginAuthMethodID {
+		reason = "terminal authentication must be run by the client"
+	}
+	return acp.AuthenticateResponse{}, acp.NewInvalidParams(map[string]any{
+		"methodId": params.MethodId,
+		"error":    reason,
+	})
 }
 
 func (a *codexACPProxyAgent) Logout(_ context.Context, _ acp.LogoutRequest) (acp.LogoutResponse, error) {
@@ -201,6 +213,7 @@ func (a *codexACPProxyAgent) Logout(_ context.Context, _ acp.LogoutRequest) (acp
 }
 
 func (a *codexACPProxyAgent) Initialize(_ context.Context, _ acp.InitializeRequest) (acp.InitializeResponse, error) {
+	authDescription := "Authenticate with the native Codex login flow"
 	return acp.InitializeResponse{
 		ProtocolVersion: acp.ProtocolVersionNumber,
 		AgentInfo: &acp.Implementation{
@@ -223,7 +236,17 @@ func (a *codexACPProxyAgent) Initialize(_ context.Context, _ acp.InitializeReque
 				Resume: &acp.SessionResumeCapabilities{},
 			},
 		},
-		AuthMethods: []acp.AuthMethod{},
+		AuthMethods: []acp.AuthMethod{
+			{
+				Terminal: &acp.AuthMethodTerminalInline{
+					Args:        []string{"login"},
+					Description: &authDescription,
+					Id:          codexLoginAuthMethodID,
+					Name:        "Log in to Codex",
+					Type:        "terminal",
+				},
+			},
+		},
 	}, nil
 }
 

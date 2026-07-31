@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -325,6 +326,39 @@ func TestInitializeAdvertisesImagePromptCapability(t *testing.T) {
 	}
 	if resp.AgentCapabilities.SessionCapabilities.Close == nil {
 		t.Fatal("sessionCapabilities.close = nil, want non-nil")
+	}
+	if got, want := len(resp.AuthMethods), 1; got != want {
+		t.Fatalf("authMethods len = %d, want %d", got, want)
+	}
+	auth := resp.AuthMethods[0]
+	if auth.Terminal == nil {
+		t.Fatal("authMethods[0].Terminal = nil, want terminal auth")
+	}
+	if got, want := auth.Terminal.Id, codexLoginAuthMethodID; got != want {
+		t.Fatalf("auth method id = %q, want %q", got, want)
+	}
+	if got, want := auth.Terminal.Type, "terminal"; got != want {
+		t.Fatalf("auth method type = %q, want %q", got, want)
+	}
+	if got, want := auth.Terminal.Name, "Log in to Codex"; got != want {
+		t.Fatalf("auth method name = %q, want %q", got, want)
+	}
+	if auth.Terminal.Description == nil {
+		t.Fatal("auth method description = nil, want non-nil")
+	}
+	if got, want := auth.Terminal.Args, []string{"login"}; !slices.Equal(got, want) {
+		t.Fatalf("auth method args = %#v, want %#v", got, want)
+	}
+	wire, err := json.Marshal(auth)
+	if err != nil {
+		t.Fatalf("json.Marshal(auth method) error = %v", err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(wire, &fields); err != nil {
+		t.Fatalf("json.Unmarshal(auth method) error = %v", err)
+	}
+	if got, want := fields["type"], "terminal"; got != want {
+		t.Fatalf("auth method wire type = %#v, want %#v", got, want)
 	}
 }
 

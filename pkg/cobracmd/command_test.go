@@ -3,7 +3,9 @@ package cobracmd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -70,13 +72,45 @@ func TestCommandExposesOnlyBridgeFlags(t *testing.T) {
 	if got := cmd.Flags().Lookup("sandbox"); got != nil {
 		t.Fatal("flag \"sandbox\" unexpectedly present")
 	}
-	for _, expectedFlag := range []string{"name", "message-streaming", "reasoning-streaming", "reasoning-thoughts", "reasoning-summary", "codex-args", "debug"} {
+	for _, expectedFlag := range []string{"name", "defer-backend", "message-streaming", "reasoning-streaming", "reasoning-thoughts", "reasoning-summary", "codex-args", "debug"} {
 		if got := cmd.Flags().Lookup(expectedFlag); got == nil {
 			t.Fatalf("flag %q missing", expectedFlag)
 		}
 	}
 	if got := cmd.Commands(); len(got) == 0 {
 		t.Fatal("commands = 0, want version subcommand")
+	}
+}
+
+func TestCommandPassesDeferBackendToRunProxy(t *testing.T) {
+	origRunProxy := runProxy
+	origInitLogging := initLogging
+	t.Cleanup(func() {
+		runProxy = origRunProxy
+		initLogging = origInitLogging
+	})
+
+	initLogging = func(...logging.OptOptionsSetter) error {
+		return nil
+	}
+
+	var gotOpts codexacpbridge.Options
+	runProxy = func(_ context.Context, _ string, opts codexacpbridge.Options, _ io.Reader, _, _ io.Writer) error {
+		gotOpts = opts
+		return nil
+	}
+
+	cmd := New()
+	cmd.SetArgs([]string{"--defer-backend"})
+	cmd.SetIn(strings.NewReader(""))
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !gotOpts.DeferBackend {
+		t.Fatal("DeferBackend = false, want true")
 	}
 }
 
@@ -131,6 +165,99 @@ func TestVersionCommandPrintsBuildVersion(t *testing.T) {
 
 	if got := stdout.String(); got != appversion.String()+"\n" {
 		t.Fatalf("stdout = %q, want %q", got, appversion.String()+"\n")
+	}
+}
+
+func TestLoginCommandDelegatesStreamsAndContext(t *testing.T) {
+	type ctxKey string
+	const key ctxKey = "login-test"
+
+	stdin := strings.NewReader("input")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	var gotContextValue string
+	var gotStdin io.Reader
+	var gotStdout io.Writer
+	var gotStderr io.Writer
+
+	cmd := loginCommand(func(ctx context.Context, in io.Reader, out, errOut io.Writer) error {
+		gotContextValue, _ = ctx.Value(key).(string)
+		gotStdin = in
+		gotStdout = out
+		gotStderr = errOut
+		return nil
+	})
+	cmd.SetIn(stdin)
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+
+	ctx := context.WithValue(context.Background(), key, "propagated")
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("ExecuteContext() error = %v", err)
+	}
+	if gotContextValue != "propagated" {
+		t.Fatalf("login context value = %q, want propagated", gotContextValue)
+	}
+	if gotStdin != stdin {
+		t.Fatal("login stdin was not passed through")
+	}
+	if gotStdout != &stdout {
+		t.Fatal("login stdout was not passed through")
+	}
+	if gotStderr != &stderr {
+		t.Fatal("login stderr was not passed through")
+	}
+}
+
+func TestLoginCommandWrapsRunnerError(t *testing.T) {
+	wantErr := errors.New("login unavailable")
+	cmd := loginCommand(func(context.Context, io.Reader, io.Writer, io.Writer) error {
+		return wantErr
+	})
+	cmd.SetIn(strings.NewReader(""))
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+
+	err := cmd.Execute()
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Execute() error = %v, want wrapped %v", err, wantErr)
+	}
+	if got := err.Error(); !strings.Contains(got, "codex login") {
+		t.Fatalf("Execute() error = %q, want login context", got)
+	}
+}
+
+func TestLoginCommandReportsMissingCodex(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+
+	cmd := loginCommand(runCodexLogin)
+	cmd.SetIn(strings.NewReader(""))
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+
+	err := cmd.Execute()
+	if !errors.Is(err, exec.ErrNotFound) {
+		t.Fatalf("Execute() error = %v, want wrapped exec.ErrNotFound", err)
+	}
+	if got := err.Error(); !strings.Contains(got, "codex login") {
+		t.Fatalf("Execute() error = %q, want login context", got)
+	}
+}
+
+func TestLoginCommandPreservesCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	cmd := loginCommand(func(ctx context.Context, _ io.Reader, _, _ io.Writer) error {
+		return ctx.Err()
+	})
+	cmd.SetIn(strings.NewReader(""))
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+
+	err := cmd.ExecuteContext(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ExecuteContext() error = %v, want context canceled", err)
 	}
 }
 

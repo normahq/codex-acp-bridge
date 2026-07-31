@@ -21,6 +21,16 @@ var DefaultAgentVersion = appversion.String()
 
 type appServerBackendFactory func(ctx context.Context, cwd string) (appServerSession, error)
 
+type connectionInput struct {
+	ready  <-chan struct{}
+	reader io.Reader
+}
+
+func (r connectionInput) Read(p []byte) (int, error) {
+	<-r.ready
+	return r.reader.Read(p)
+}
+
 // RunProxy starts the Codex backend and exposes it as an ACP agent over stdio.
 func RunProxy(ctx context.Context, workingDir string, opts Options, stdin io.Reader, stdout, stderr io.Writer) error {
 	if stdin == nil {
@@ -56,10 +66,14 @@ func RunProxy(ctx context.Context, workingDir string, opts Options, stdin io.Rea
 	sessionFactory := func(factoryCtx context.Context, sessionCWD string) (appServerSession, error) {
 		return connectAppServerBackend(ctx, factoryCtx, workingDir, sessionCWD, command, bridgeClientName, lockedStderr, logger, opts)
 	}
-	identity, err := validateAppServerFactory(ctx, sessionFactory, workingDir)
-	if err != nil {
-		logger.Error().Err(err).Msg("codex backend initialization failed")
-		return err
+	var identity appServerIdentity
+	if !opts.DeferBackend {
+		var err error
+		identity, err = validateAppServerFactory(ctx, sessionFactory, workingDir)
+		if err != nil {
+			logger.Error().Err(err).Msg("codex backend initialization failed")
+			return err
+		}
 	}
 	agentName, agentVersion := resolveAgentIdentity(requestedAgentName, identity)
 	logger.Debug().
@@ -70,9 +84,14 @@ func RunProxy(ctx context.Context, workingDir string, opts Options, stdin io.Rea
 	proxy := newCodexACPProxyAgent(sessionFactory, agentName, opts.appConfig(), logger)
 	proxy.setBridgeOptions(opts)
 	proxy.setAgentVersion(agentVersion)
-	conn := acp.NewAgentSideConnection(proxy, stdout, stdin)
+	connectionReady := make(chan struct{})
+	conn := acp.NewAgentSideConnection(proxy, stdout, connectionInput{
+		ready:  connectionReady,
+		reader: stdin,
+	})
 	conn.SetLogger(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	proxy.setConnection(conn)
+	close(connectionReady)
 
 	select {
 	case <-conn.Done():
