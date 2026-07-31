@@ -60,6 +60,7 @@ const (
 // Options configures Codex bridge backend -> ACP proxy behavior.
 type Options struct {
 	Name               string
+	DeferBackend       bool
 	MessageStreaming   bool
 	ReasoningStreaming bool
 	ReasoningThoughts  string

@@ -15,7 +15,7 @@ It is not an OpenAI API proxy. It uses the authenticated Codex session on the ma
 ## Requirements
 
 - `codex` CLI installed and available in `PATH`.
-- Authenticated Codex session on the host running the bridge.
+- Authenticated Codex session on the host running the bridge. Run `codex-acp-bridge login` or `codex login` to authenticate.
 - Active Codex subscription.
 
 ## Quickstart
@@ -52,9 +52,23 @@ Then run:
 codex-acp-bridge
 ```
 
+## Zed ACP Registry
+
+Install **Codex ACP Bridge** from Zed's ACP Registry:
+
+1. Run `zed: acp registry` from the Zed command palette.
+2. Search for **Codex ACP Bridge** and install it.
+3. Start a Codex ACP Bridge thread from the Agent Panel or Threads Sidebar.
+4. If Zed prompts for authentication, choose **Log in to Codex**. The bridge runs the native `codex login` terminal flow; Codex owns the browser/device interaction and credential storage.
+
+You can also open `agent: open settings`, go to **External Agents**, select **Add Agent**, and choose **Install from Registry**. See [Zed's External Agents documentation](https://zed.dev/docs/ai/external-agents) for the current UI flow.
+
+The registry launch uses `--defer-backend` so Zed can complete ACP discovery and offer the native login method before starting `codex app-server`. Codex is still required for sessions: the first backend-dependent request reports a normal ACP error if `codex` is unavailable or cannot start.
+
 ## What The Bridge Provides
 
 - ACP `initialize`, `session/new`, `session/prompt`, `session/cancel`, `session/list`, `session/close`, and `session/resume` backed by Codex app-server threads.
+- ACP terminal authentication that delegates to the native `codex login` command without handling credentials in the bridge.
 - Durable ACP session IDs mapped directly to Codex app-server `thread.id` values.
 - ACP-native model handling through stable `session/new.configOptions` and `session/set_config_option` for `model`, with legacy `session/new.models` and `session/set_model` kept for compatibility.
 - ACP session configuration for model-advertised reasoning effort values.
@@ -75,6 +89,7 @@ codex-acp-bridge [flags]
 Common flags:
 
 - `--name`: ACP agent name reported in `initialize.agentInfo.name`. Default: `norma-codex-acp-bridge`.
+- `--defer-backend`: allow ACP initialization before validating `codex app-server`; backend-dependent requests still start Codex and return an error if it is unavailable. Default: `false`.
 - `--message-streaming`: stream Codex `agentMessage` deltas as ACP `agent_message_chunk` updates. Default: `false`.
 - `--reasoning-streaming`: stream Codex reasoning text deltas live; when disabled, raw/content token deltas stay off, while summary thoughts still publish incrementally on completed summary parts. Default: `true`.
 - `--reasoning-summary`: app-server reasoning summary level to request: `auto`, `concise`, `detailed`, or `none`. Default: `auto`.
@@ -86,6 +101,7 @@ Examples:
 
 ```bash
 codex-acp-bridge --name team-codex
+codex-acp-bridge --defer-backend
 codex-acp-bridge --message-streaming
 codex-acp-bridge --reasoning-thoughts=both
 codex-acp-bridge --reasoning-summary=detailed

@@ -3,6 +3,7 @@ package codexacp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	acp "github.com/coder/acp-go-sdk"
@@ -98,18 +99,24 @@ func TestSetAgentVersionDefaultsWhenEmpty(t *testing.T) {
 	}
 }
 
-func TestAuthenticateReturnsEmptyResponse(t *testing.T) {
+func TestAuthenticateRejectsTerminalAndUnknownMethods(t *testing.T) {
 	logger := zerolog.Nop()
 	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
 		return nil, nil
 	}, "agent", codexAppConfig{}, &logger)
 
-	resp, err := agent.Authenticate(context.Background(), acp.AuthenticateRequest{})
-	if err != nil {
-		t.Fatalf("Authenticate() error = %v", err)
-	}
-	if len(resp.Meta) != 0 {
-		t.Fatalf("Authenticate() response = %#v, want zero value", resp)
+	for _, methodID := range []string{codexLoginAuthMethodID, "unknown"} {
+		_, err := agent.Authenticate(context.Background(), acp.AuthenticateRequest{MethodId: methodID})
+		if err == nil {
+			t.Fatalf("Authenticate(%q) error = nil, want invalid params", methodID)
+		}
+		reqErr := &acp.RequestError{}
+		if !errors.As(err, &reqErr) {
+			t.Fatalf("Authenticate(%q) error type = %T, want *acp.RequestError", methodID, err)
+		}
+		if reqErr.Code != -32602 {
+			t.Fatalf("Authenticate(%q) error code = %d, want -32602", methodID, reqErr.Code)
+		}
 	}
 }
 

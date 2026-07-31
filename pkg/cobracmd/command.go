@@ -1,8 +1,11 @@
 package cobracmd
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"strings"
 
 	codexacpbridge "github.com/normahq/codex-acp-bridge/internal/apps/codexacpbridge"
@@ -57,6 +60,7 @@ func New() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&opts.Name, "name", "", "ACP agent name exposed via initialize (defaults to norma-codex-acp-bridge)")
+	cmd.Flags().BoolVar(&opts.DeferBackend, "defer-backend", false, "defer Codex backend validation until a session operation")
 	cmd.Flags().BoolVar(&opts.MessageStreaming, "message-streaming", false, "stream app-server agentMessage deltas as ACP agent_message_chunk updates")
 	cmd.Flags().BoolVar(&reasoningStreaming, "reasoning-streaming", true, "stream app-server reasoning deltas as ACP agent_thought_chunk updates")
 	cmd.Flags().StringVar(&reasoningThoughts, "reasoning-thoughts", reasoningThoughts, "reasoning thought lane to project: off, summary, content, or both")
@@ -67,6 +71,7 @@ func New() *cobra.Command {
 	//nolint:dupword
 	cmd.Example = `  codex-acp-bridge
   codex-acp-bridge --name team-codex
+  codex-acp-bridge --defer-backend
   codex-acp-bridge version
   codex-acp-bridge --message-streaming
   codex-acp-bridge --reasoning-thoughts=both
@@ -74,13 +79,38 @@ func New() *cobra.Command {
   codex-acp-bridge --reasoning-streaming=false
   codex-acp-bridge --codex-args=--sandbox=workspace-write
   codex-acp-bridge --debug`
-	cmd.AddCommand(versionCommand())
+	cmd.AddCommand(loginCommand(runCodexLogin), versionCommand())
 	return cmd
 }
 
 // Command is kept as a compatibility alias for older import sites.
 func Command() *cobra.Command {
 	return New()
+}
+
+type loginRunner func(context.Context, io.Reader, io.Writer, io.Writer) error
+
+func loginCommand(run loginRunner) *cobra.Command {
+	return &cobra.Command{
+		Use:          "login",
+		Short:        "Authenticate with Codex",
+		SilenceUsage: true,
+		Args:         cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := run(cmd.Context(), cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
+				return fmt.Errorf("codex login: %w", err)
+			}
+			return nil
+		},
+	}
+}
+
+func runCodexLogin(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer) error {
+	cmd := exec.CommandContext(ctx, "codex", "login")
+	cmd.Stdin = stdin
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	return cmd.Run()
 }
 
 func versionCommand() *cobra.Command {

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"os/exec"
 	"sync"
@@ -90,7 +89,6 @@ func newIntegrationACPClient(ctx context.Context, cfg integrationACPClientConfig
 		active: map[acp.SessionId]*integrationPromptState{},
 	}
 	client.conn = acp.NewClientSideConnection(client, stdin, stdout)
-	client.conn.SetLogger(slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	return client, nil
 }

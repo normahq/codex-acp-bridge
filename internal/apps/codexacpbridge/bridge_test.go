@@ -6,6 +6,9 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
+
+	acp "github.com/coder/acp-go-sdk"
 )
 
 const (
@@ -18,6 +21,46 @@ type appServerSessionSpy struct {
 	closeCalls         int
 	waitCalls          int
 }
+
+type bridgeTestClient struct{}
+
+func (bridgeTestClient) ReadTextFile(context.Context, acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
+	return acp.ReadTextFileResponse{}, errors.New("not implemented")
+}
+
+func (bridgeTestClient) WriteTextFile(context.Context, acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error) {
+	return acp.WriteTextFileResponse{}, errors.New("not implemented")
+}
+
+func (bridgeTestClient) RequestPermission(context.Context, acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
+	return acp.RequestPermissionResponse{}, errors.New("not implemented")
+}
+
+func (bridgeTestClient) SessionUpdate(context.Context, acp.SessionNotification) error {
+	return nil
+}
+
+func (bridgeTestClient) CreateTerminal(context.Context, acp.CreateTerminalRequest) (acp.CreateTerminalResponse, error) {
+	return acp.CreateTerminalResponse{}, errors.New("not implemented")
+}
+
+func (bridgeTestClient) KillTerminal(context.Context, acp.KillTerminalRequest) (acp.KillTerminalResponse, error) {
+	return acp.KillTerminalResponse{}, errors.New("not implemented")
+}
+
+func (bridgeTestClient) TerminalOutput(context.Context, acp.TerminalOutputRequest) (acp.TerminalOutputResponse, error) {
+	return acp.TerminalOutputResponse{}, errors.New("not implemented")
+}
+
+func (bridgeTestClient) ReleaseTerminal(context.Context, acp.ReleaseTerminalRequest) (acp.ReleaseTerminalResponse, error) {
+	return acp.ReleaseTerminalResponse{}, errors.New("not implemented")
+}
+
+func (bridgeTestClient) WaitForTerminalExit(context.Context, acp.WaitForTerminalExitRequest) (acp.WaitForTerminalExitResponse, error) {
+	return acp.WaitForTerminalExitResponse{}, errors.New("not implemented")
+}
+
+var _ acp.Client = bridgeTestClient{}
 
 func (s *appServerSessionSpy) InitializeResponse() appServerInitializeResponse {
 	return s.initializeResponse
@@ -121,6 +164,86 @@ func TestRunProxyRequiresIOStreams(t *testing.T) {
 				t.Fatalf("RunProxy() error = %q, want %q", err.Error(), tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestRunProxyEagerModeRequiresCodex(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+
+	err := RunProxy(
+		context.Background(),
+		t.TempDir(),
+		Options{},
+		strings.NewReader(""),
+		io.Discard,
+		io.Discard,
+	)
+	if err == nil {
+		t.Fatal("RunProxy() error = nil, want missing Codex error")
+	}
+	if !strings.Contains(err.Error(), `exec: "codex": executable file not found`) {
+		t.Fatalf("RunProxy() error = %q, want missing Codex context", err)
+	}
+}
+
+func TestRunProxyDeferredModeInitializesWithoutCodexAndDefersFailure(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+
+	clientToAgentReader, clientToAgentWriter := io.Pipe()
+	agentToClientReader, agentToClientWriter := io.Pipe()
+	t.Cleanup(func() {
+		_ = clientToAgentReader.Close()
+		_ = clientToAgentWriter.Close()
+		_ = agentToClientReader.Close()
+		_ = agentToClientWriter.Close()
+	})
+	runResult := make(chan error, 1)
+	go func() {
+		runResult <- RunProxy(
+			context.Background(),
+			t.TempDir(),
+			Options{DeferBackend: true},
+			clientToAgentReader,
+			agentToClientWriter,
+			io.Discard,
+		)
+	}()
+
+	clientConn := acp.NewClientSideConnection(bridgeTestClient{}, clientToAgentWriter, agentToClientReader)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	initResponse, err := clientConn.Initialize(ctx, acp.InitializeRequest{
+		ProtocolVersion: acp.ProtocolVersionNumber,
+	})
+	if err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	if got, want := initResponse.AgentInfo.Name, DefaultAgentName; got != want {
+		t.Fatalf("Initialize().AgentInfo.Name = %q, want %q", got, want)
+	}
+	if got, want := initResponse.AgentInfo.Version, DefaultAgentVersion; got != want {
+		t.Fatalf("Initialize().AgentInfo.Version = %q, want %q", got, want)
+	}
+
+	_, err = clientConn.ListSessions(ctx, acp.ListSessionsRequest{})
+	if err == nil {
+		t.Fatal("ListSessions() error = nil, want missing Codex error")
+	}
+	if !strings.Contains(err.Error(), "executable file not found") {
+		t.Fatalf("ListSessions() error = %q, want missing Codex context", err)
+	}
+
+	if err := clientToAgentWriter.Close(); err != nil {
+		t.Fatalf("close client input: %v", err)
+	}
+	select {
+	case err := <-runResult:
+		if err != nil {
+			t.Fatalf("RunProxy() error = %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatalf("RunProxy() did not stop after disconnect: %v", ctx.Err())
 	}
 }
 
