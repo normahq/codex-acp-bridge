@@ -72,8 +72,9 @@ acp-repl -- codex-acp-bridge
   Select which reasoning lane is projected as ACP thoughts: `off`, `summary`, `content`, or `both`.
   Default: `summary`. If app-server completes a reasoning item with no summary text but with raw content, summary mode emits that completed content as a fallback thought.
 - `--codex-args`:
-  Repeatable argument forwarded to `codex app-server` unchanged.
-  Example: `--codex-args=--sandbox=workspace-write`.
+  Repeatable global Codex argument inserted before the `app-server` subcommand.
+  Example: `--codex-args=--sandbox=danger-full-access` runs
+  `codex --sandbox=danger-full-access app-server`.
 - `--debug`:
   Enable debug logging for the bridge process.
 

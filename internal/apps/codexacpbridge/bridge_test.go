@@ -264,8 +264,8 @@ func TestBuildCodexAppCommandAppendsForwardedArgs(t *testing.T) {
 	if len(got) != 4 {
 		t.Fatalf("buildCodexAppCommand() len = %d, want 4", len(got))
 	}
-	if got[0] != bridgeAppServerBinary || got[1] != bridgeAppServerSubcommand || got[2] != "--sandbox=workspace-write" || got[3] != "--search" {
-		t.Fatalf("buildCodexAppCommand() = %#v, want [%q, %q, \"--sandbox=workspace-write\", \"--search\"]", got, bridgeAppServerBinary, bridgeAppServerSubcommand)
+	if got[0] != bridgeAppServerBinary || got[1] != "--sandbox=workspace-write" || got[2] != "--search" || got[3] != bridgeAppServerSubcommand {
+		t.Fatalf("buildCodexAppCommand() = %#v, want [%q, \"--sandbox=workspace-write\", \"--search\", %q]", got, bridgeAppServerBinary, bridgeAppServerSubcommand)
 	}
 }
 
