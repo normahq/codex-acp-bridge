@@ -108,11 +108,8 @@ func RunProxy(ctx context.Context, workingDir string, opts Options, stdin io.Rea
 }
 
 func buildCodexAppCommand(opts Options) []string {
-	command := []string{"codex", "app-server"}
-	if len(opts.CodexArgs) == 0 {
-		return command
-	}
-	return append(command, opts.CodexArgs...)
+	command := append([]string{"codex"}, opts.CodexArgs...)
+	return append(command, "app-server")
 }
 
 func validateAppServerFactory(ctx context.Context, factory appServerBackendFactory, cwd string) (appServerIdentity, error) {

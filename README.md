@@ -95,7 +95,7 @@ Common flags:
 - `--reasoning-streaming`: stream Codex reasoning text deltas live; when disabled, raw/content token deltas stay off, while summary thoughts still publish incrementally on completed summary parts. Default: `true`.
 - `--reasoning-summary`: app-server reasoning summary level to request: `auto`, `concise`, `detailed`, or `none`. Default: `auto`.
 - `--reasoning-thoughts`: reasoning lane projected as ACP thoughts: `off`, `summary`, `content`, or `both`. Default: `summary`; when no summary is available, completed raw content is emitted as a fallback thought.
-- `--codex-args`: repeatable argument forwarded to `codex app-server` unchanged. Example: `--codex-args=--sandbox=workspace-write`.
+- `--codex-args`: repeatable global Codex argument inserted before `app-server`. Example: `--codex-args=--sandbox=danger-full-access`.
 - `--debug`: enable debug logging.
 
 Examples:

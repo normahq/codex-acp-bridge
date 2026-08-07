@@ -133,7 +133,7 @@ func TestCommandPassesCodexArgsToRunProxy(t *testing.T) {
 	}
 
 	cmd := New()
-	cmd.SetArgs([]string{"--codex-args=--sandbox=workspace-write", "--codex-args=--search"})
+	cmd.SetArgs([]string{"--codex-args=--sandbox=danger-full-access", "--codex-args=--search"})
 	cmd.SetIn(strings.NewReader(""))
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
@@ -144,8 +144,8 @@ func TestCommandPassesCodexArgsToRunProxy(t *testing.T) {
 	if len(gotOpts.CodexArgs) != 2 {
 		t.Fatalf("CodexArgs len = %d, want 2", len(gotOpts.CodexArgs))
 	}
-	if gotOpts.CodexArgs[0] != "--sandbox=workspace-write" {
-		t.Fatalf("CodexArgs[0] = %q, want %q", gotOpts.CodexArgs[0], "--sandbox=workspace-write")
+	if gotOpts.CodexArgs[0] != "--sandbox=danger-full-access" {
+		t.Fatalf("CodexArgs[0] = %q, want %q", gotOpts.CodexArgs[0], "--sandbox=danger-full-access")
 	}
 	if gotOpts.CodexArgs[1] != "--search" {
 		t.Fatalf("CodexArgs[1] = %q, want %q", gotOpts.CodexArgs[1], "--search")
