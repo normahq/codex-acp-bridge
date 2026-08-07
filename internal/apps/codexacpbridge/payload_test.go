@@ -1,7 +1,6 @@
 package codexacp
 
 import (
-	"strings"
 	"testing"
 
 	acp "github.com/coder/acp-go-sdk"
@@ -45,20 +44,30 @@ func TestBuildTurnStartParamsImageDataURLFallback(t *testing.T) {
 	}
 }
 
-func TestBuildTurnStartParamsRejectsUnsupportedResourceLink(t *testing.T) {
-	_, err := buildTurnStartParams("thr-1", []acp.ContentBlock{
-		{
-			ResourceLink: &acp.ContentBlockResourceLink{
-				Name: "repo",
-				Uri:  "file:///tmp/repo",
-			},
-		},
+func TestBuildTurnStartParamsSupportsResourceLink(t *testing.T) {
+	mimeType := "application/json"
+	resource := acp.ResourceLinkBlock("swagger.json", "file:///state/attachments/swagger%20spec.json")
+	resource.ResourceLink.MimeType = &mimeType
+	params, err := buildTurnStartParams("thr-1", []acp.ContentBlock{
+		resource,
 	}, "", "", "")
-	if err == nil {
-		t.Fatal("buildTurnStartParams() error = nil, want unsupported resource_link error")
+	if err != nil {
+		t.Fatalf("buildTurnStartParams() error = %v", err)
 	}
-	if !strings.Contains(err.Error(), "unsupported prompt content block type: resource_link") {
-		t.Fatalf("buildTurnStartParams() error = %v, want unsupported resource_link", err)
+	input := listValue(params, "input")
+	if len(input) != 1 {
+		t.Fatalf("input items = %d, want 1", len(input))
+	}
+	item, ok := input[0].(map[string]any)
+	if !ok {
+		t.Fatalf("input[0] type = %T, want map[string]any", input[0])
+	}
+	if got := stringValue(item, "type"); got != testInputTypeText {
+		t.Fatalf("input[0].type = %q, want text", got)
+	}
+	want := `Attached resource: name="swagger.json", local_path="/state/attachments/swagger spec.json", mime_type="application/json"`
+	if got := stringValue(item, "text"); got != want {
+		t.Fatalf("input[0].text = %q, want %q", got, want)
 	}
 }
 

@@ -24,6 +24,7 @@ const (
 	testApprovalOnRequest      = "on-request"
 	testApprovalsReviewerGuard = "guardian_subagent"
 	testCWD                    = "/tmp/work"
+	testInputTypeText          = "text"
 	testMCPTransportStdio      = "stdio"
 	testPersonalityPragmatic   = "pragmatic"
 	testPlanRunTests           = "Run tests"
@@ -523,7 +524,7 @@ func TestSetSessionModelRejectsUnadvertisedModelAndKeepsPreviousModel(t *testing
 	}
 }
 
-func TestPromptForwardsTextAndImageBlocksToTurnStart(t *testing.T) {
+func TestPromptForwardsTextImageAndResourceLinkBlocksToTurnStart(t *testing.T) {
 	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
 	queueNotification(session, "turn/completed", map[string]any{
 		"threadId": "thr-1",
@@ -548,11 +549,17 @@ func TestPromptForwardsTextAndImageBlocksToTurnStart(t *testing.T) {
 	}
 
 	imageURI := "https://example.com/image.png"
+	mimeType := "application/json"
 	promptResp, err := agent.Prompt(context.Background(), acp.PromptRequest{
 		SessionId: newResp.SessionId,
 		Prompt: []acp.ContentBlock{
 			acp.TextBlock("hello"),
 			{Image: &acp.ContentBlockImage{Uri: &imageURI}},
+			{ResourceLink: &acp.ContentBlockResourceLink{
+				Name:     "swagger.json",
+				Uri:      "file:///state/attachments/swagger.json",
+				MimeType: &mimeType,
+			}},
 		},
 	})
 	if err != nil {
@@ -567,14 +574,14 @@ func TestPromptForwardsTextAndImageBlocksToTurnStart(t *testing.T) {
 		t.Fatalf("turn/start calls = %d, want 1", len(turnStartParams))
 	}
 	inputItems := listValue(turnStartParams[0], "input")
-	if len(inputItems) != 2 {
-		t.Fatalf("turn/start input items = %d, want 2", len(inputItems))
+	if len(inputItems) != 3 {
+		t.Fatalf("turn/start input items = %d, want 3", len(inputItems))
 	}
 	first, ok := inputItems[0].(map[string]any)
 	if !ok {
 		t.Fatalf("turn/start input[0] type = %T, want map[string]any", inputItems[0])
 	}
-	if got := stringValue(first, "type"); got != "text" {
+	if got := stringValue(first, "type"); got != testInputTypeText {
 		t.Fatalf("turn/start input[0].type = %q, want text", got)
 	}
 	if got := stringValue(first, "text"); got != "hello" {
@@ -589,6 +596,17 @@ func TestPromptForwardsTextAndImageBlocksToTurnStart(t *testing.T) {
 	}
 	if got := stringValue(second, "url"); got != imageURI {
 		t.Fatalf("turn/start input[1].url = %q, want %q", got, imageURI)
+	}
+	third, ok := inputItems[2].(map[string]any)
+	if !ok {
+		t.Fatalf("turn/start input[2] type = %T, want map[string]any", inputItems[2])
+	}
+	if got := stringValue(third, "type"); got != testInputTypeText {
+		t.Fatalf("turn/start input[2].type = %q, want text", got)
+	}
+	wantResource := `Attached resource: name="swagger.json", local_path="/state/attachments/swagger.json", mime_type="application/json"`
+	if got := stringValue(third, "text"); got != wantResource {
+		t.Fatalf("turn/start input[2].text = %q, want %q", got, wantResource)
 	}
 }
 

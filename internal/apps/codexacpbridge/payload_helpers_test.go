@@ -26,7 +26,7 @@ func TestBuildTurnInputItemsTrimsTextAndSupportsImageURI(t *testing.T) {
 	if !ok {
 		t.Fatalf("items[0] type = %T, want map[string]any", items[0])
 	}
-	if got, want := textItem["type"], "text"; got != want {
+	if got, want := textItem["type"], testInputTypeText; got != want {
 		t.Fatalf("items[0].type = %#v, want %q", got, want)
 	}
 	if got, want := textItem["text"], "hello world"; got != want {
@@ -56,11 +56,6 @@ func TestBuildTurnInputItemsRejectsUnsupportedTypes(t *testing.T) {
 			wantErr: "unsupported prompt content block type: audio",
 		},
 		{
-			name:    "resource link",
-			block:   acp.ResourceLinkBlock("repo", "file:///tmp/repo"),
-			wantErr: "unsupported prompt content block type: resource_link",
-		},
-		{
 			name:    "resource",
 			block:   acp.ContentBlock{Resource: &acp.ContentBlockResource{}},
 			wantErr: "unsupported prompt content block type: resource",
@@ -86,15 +81,64 @@ func TestBuildTurnInputItemsRejectsUnsupportedTypes(t *testing.T) {
 	}
 }
 
-func TestBuildTurnStartParamsRejectsPromptWithoutTextOrImage(t *testing.T) {
+func TestBuildTurnStartParamsRejectsPromptWithoutSupportedContent(t *testing.T) {
 	_, err := buildTurnStartParams("thread-1", []acp.ContentBlock{
 		acp.TextBlock("   "),
 	}, "", "", "")
 	if err == nil {
 		t.Fatal("buildTurnStartParams() error = nil, want non-nil")
 	}
-	if !strings.Contains(err.Error(), "prompt must include at least one text or image content block") {
-		t.Fatalf("buildTurnStartParams() error = %q, want missing text/image message", err.Error())
+	if !strings.Contains(err.Error(), "prompt must include at least one text, image, or resource link content block") {
+		t.Fatalf("buildTurnStartParams() error = %q, want missing supported-content message", err.Error())
+	}
+}
+
+func TestResourceLinkText(t *testing.T) {
+	t.Parallel()
+
+	mimeType := " application/json "
+	cases := []struct {
+		name    string
+		block   *acp.ContentBlockResourceLink
+		want    string
+		wantErr string
+	}{
+		{
+			name: "local file URI",
+			block: &acp.ContentBlockResourceLink{
+				Name:     " swagger.json ",
+				Uri:      "file:///state/attachments/swagger%20spec.json",
+				MimeType: &mimeType,
+			},
+			want: `Attached resource: name="swagger.json", local_path="/state/attachments/swagger spec.json", mime_type="application/json"`,
+		},
+		{
+			name:  "non-file URI",
+			block: &acp.ContentBlockResourceLink{Name: "docs", Uri: "https://example.test/docs"},
+			want:  `Attached resource: name="docs", uri="https://example.test/docs"`,
+		},
+		{name: "nil", wantErr: "resource link block is required"},
+		{name: "missing name", block: &acp.ContentBlockResourceLink{Uri: "file:///tmp/a"}, wantErr: "resource link name is required"},
+		{name: "missing URI", block: &acp.ContentBlockResourceLink{Name: "a"}, wantErr: "resource link URI is required"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := resourceLinkText(tc.block)
+			if tc.wantErr != "" {
+				if err == nil || err.Error() != tc.wantErr {
+					t.Fatalf("resourceLinkText() error = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resourceLinkText() error = %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("resourceLinkText() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
