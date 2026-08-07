@@ -2,6 +2,9 @@ package codexacp
 
 import (
 	"fmt"
+	"net/url"
+	"path/filepath"
+	"strconv"
 	"strings"
 
 	acp "github.com/coder/acp-go-sdk"
@@ -162,7 +165,7 @@ func buildTurnStartParams(
 		return nil, err
 	}
 	if len(inputItems) == 0 {
-		return nil, fmt.Errorf("prompt must include at least one text or image content block")
+		return nil, fmt.Errorf("prompt must include at least one text, image, or resource link content block")
 	}
 
 	params := map[string]any{
@@ -190,11 +193,7 @@ func buildTurnInputItems(prompt []acp.ContentBlock) ([]any, error) {
 			if trimmed == "" {
 				continue
 			}
-			items = append(items, map[string]any{
-				"type":          "text",
-				"text":          trimmed,
-				"text_elements": []any{},
-			})
+			items = append(items, textInputItem(trimmed))
 		case block.Image != nil:
 			url, err := imageBlockURL(block.Image)
 			if err != nil {
@@ -207,7 +206,11 @@ func buildTurnInputItems(prompt []acp.ContentBlock) ([]any, error) {
 		case block.Audio != nil:
 			return nil, fmt.Errorf("unsupported prompt content block type: audio")
 		case block.ResourceLink != nil:
-			return nil, fmt.Errorf("unsupported prompt content block type: resource_link")
+			text, err := resourceLinkText(block.ResourceLink)
+			if err != nil {
+				return nil, err
+			}
+			items = append(items, textInputItem(text))
 		case block.Resource != nil:
 			return nil, fmt.Errorf("unsupported prompt content block type: resource")
 		default:
@@ -215,6 +218,47 @@ func buildTurnInputItems(prompt []acp.ContentBlock) ([]any, error) {
 		}
 	}
 	return items, nil
+}
+
+func textInputItem(text string) map[string]any {
+	return map[string]any{
+		"type":          "text",
+		"text":          text,
+		"text_elements": []any{},
+	}
+}
+
+func resourceLinkText(block *acp.ContentBlockResourceLink) (string, error) {
+	if block == nil {
+		return "", fmt.Errorf("resource link block is required")
+	}
+	name := strings.TrimSpace(block.Name)
+	if name == "" {
+		return "", fmt.Errorf("resource link name is required")
+	}
+	uri := strings.TrimSpace(block.Uri)
+	if uri == "" {
+		return "", fmt.Errorf("resource link URI is required")
+	}
+	parsed, err := url.Parse(uri)
+	if err != nil {
+		return "", fmt.Errorf("parse resource link URI: %w", err)
+	}
+
+	fields := []string{"name=" + strconv.Quote(name)}
+	if strings.EqualFold(parsed.Scheme, "file") &&
+		(parsed.Host == "" || strings.EqualFold(parsed.Host, "localhost")) &&
+		parsed.RawQuery == "" && parsed.Fragment == "" && filepath.IsAbs(parsed.Path) {
+		fields = append(fields, "local_path="+strconv.Quote(filepath.Clean(filepath.FromSlash(parsed.Path))))
+	} else {
+		fields = append(fields, "uri="+strconv.Quote(uri))
+	}
+	if block.MimeType != nil {
+		if mimeType := strings.TrimSpace(*block.MimeType); mimeType != "" {
+			fields = append(fields, "mime_type="+strconv.Quote(mimeType))
+		}
+	}
+	return "Attached resource: " + strings.Join(fields, ", "), nil
 }
 
 func imageBlockURL(block *acp.ContentBlockImage) (string, error) {

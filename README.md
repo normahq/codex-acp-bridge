@@ -72,7 +72,8 @@ The registry launch uses `--defer-backend` so Zed can complete ACP discovery and
 - Durable ACP session IDs mapped directly to Codex app-server `thread.id` values.
 - ACP-native model handling through stable `session/new.configOptions` and `session/set_config_option` for `model`, with legacy `session/new.models` and `session/set_model` kept for compatibility.
 - ACP session configuration for model-advertised reasoning effort values.
-- Text and image prompt blocks.
+- Text, image, and baseline ACP resource-link prompt blocks. Local `file://`
+  resource links are forwarded to Codex as local-path attachment metadata.
 - Optional streaming for Codex agent messages and reasoning thoughts.
 - Per-session MCP server configuration from ACP `mcpServers`.
 - Raw terminal provider/app-server failure details preserved in `session/prompt._meta.error`.

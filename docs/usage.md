@@ -136,7 +136,11 @@ acp-repl -- codex-acp-bridge
 - `session/prompt._meta.error` preserves raw provider/app-server terminal error details for `error(willRetry=false)` and `turn/completed(status=failed)` when the backend provides them.
 - Prompt content support:
   - Text and image prompt blocks are supported (`PromptCapabilities.image=true`).
+  - Baseline ACP resource links are supported. Local `file://` URIs are decoded
+    into ordered text input containing the resource name, local path, and MIME
+    type; the bridge does not read the referenced file.
   - Audio prompt blocks are not supported in `session/prompt` (`PromptCapabilities.audio=false`).
+  - Embedded resource blocks are not supported (`PromptCapabilities.embeddedContext=false`).
 
 ## `session/new._meta.codex` Mapping
 
