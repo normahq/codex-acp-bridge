@@ -54,7 +54,7 @@ func TestCommandUsesBridgeComponentLogger(t *testing.T) {
 	}
 }
 
-func TestCommandExposesOnlyBridgeFlags(t *testing.T) {
+func TestCommandExposesBridgeFlags(t *testing.T) {
 	cmd := New()
 	for _, removedFlag := range []string{
 		"codex-sandbox",
@@ -69,10 +69,7 @@ func TestCommandExposesOnlyBridgeFlags(t *testing.T) {
 			t.Fatalf("flag %q unexpectedly present", removedFlag)
 		}
 	}
-	if got := cmd.Flags().Lookup("sandbox"); got != nil {
-		t.Fatal("flag \"sandbox\" unexpectedly present")
-	}
-	for _, expectedFlag := range []string{"name", "defer-backend", "message-streaming", "reasoning-streaming", "reasoning-thoughts", "reasoning-summary", "codex-args", "debug"} {
+	for _, expectedFlag := range []string{"name", "defer-backend", "message-streaming", "reasoning-streaming", "reasoning-thoughts", "reasoning-summary", "codex-args", "sandbox", "debug"} {
 		if got := cmd.Flags().Lookup(expectedFlag); got == nil {
 			t.Fatalf("flag %q missing", expectedFlag)
 		}
@@ -114,7 +111,7 @@ func TestCommandPassesDeferBackendToRunProxy(t *testing.T) {
 	}
 }
 
-func TestCommandPassesCodexArgsToRunProxy(t *testing.T) {
+func TestCommandPassesCodexArgsAndSandboxToRunProxy(t *testing.T) {
 	origRunProxy := runProxy
 	origInitLogging := initLogging
 	t.Cleanup(func() {
@@ -133,7 +130,7 @@ func TestCommandPassesCodexArgsToRunProxy(t *testing.T) {
 	}
 
 	cmd := New()
-	cmd.SetArgs([]string{"--codex-args=--sandbox=danger-full-access", "--codex-args=--search"})
+	cmd.SetArgs([]string{"--sandbox=danger-full-access", "--codex-args=--search"})
 	cmd.SetIn(strings.NewReader(""))
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
@@ -141,14 +138,14 @@ func TestCommandPassesCodexArgsToRunProxy(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if len(gotOpts.CodexArgs) != 2 {
-		t.Fatalf("CodexArgs len = %d, want 2", len(gotOpts.CodexArgs))
+	if len(gotOpts.CodexArgs) != 1 {
+		t.Fatalf("CodexArgs len = %d, want 1", len(gotOpts.CodexArgs))
 	}
-	if gotOpts.CodexArgs[0] != "--sandbox=danger-full-access" {
-		t.Fatalf("CodexArgs[0] = %q, want %q", gotOpts.CodexArgs[0], "--sandbox=danger-full-access")
+	if gotOpts.CodexArgs[0] != "--search" {
+		t.Fatalf("CodexArgs[0] = %q, want %q", gotOpts.CodexArgs[0], "--search")
 	}
-	if gotOpts.CodexArgs[1] != "--search" {
-		t.Fatalf("CodexArgs[1] = %q, want %q", gotOpts.CodexArgs[1], "--search")
+	if gotOpts.Sandbox != "danger-full-access" {
+		t.Fatalf("Sandbox = %q, want %q", gotOpts.Sandbox, "danger-full-access")
 	}
 }
 

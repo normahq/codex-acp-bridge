@@ -85,3 +85,17 @@ func TestOptionsAppConfigEmptyByDefault(t *testing.T) {
 		t.Fatalf("appConfig().Sandbox = %q, want empty", got)
 	}
 }
+
+func TestOptionsAppConfigUsesSandbox(t *testing.T) {
+	cfg := Options{Sandbox: " danger-full-access "}.appConfig()
+	if got, want := cfg.Sandbox, "danger-full-access"; got != want {
+		t.Fatalf("appConfig().Sandbox = %q, want %q", got, want)
+	}
+}
+
+func TestOptionsValidateRejectsInvalidSandbox(t *testing.T) {
+	err := (Options{Sandbox: "invalid"}).validate()
+	if err == nil {
+		t.Fatal("validate() error = nil, want invalid sandbox error")
+	}
+}

@@ -109,6 +109,9 @@ func RunProxy(ctx context.Context, workingDir string, opts Options, stdin io.Rea
 
 func buildCodexAppCommand(opts Options) []string {
 	command := append([]string{"codex"}, opts.CodexArgs...)
+	if sandbox := strings.TrimSpace(opts.Sandbox); sandbox != "" {
+		command = append(command, "--sandbox="+sandbox)
+	}
 	return append(command, "app-server")
 }
 

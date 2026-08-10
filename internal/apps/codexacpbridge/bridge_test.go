@@ -269,6 +269,22 @@ func TestBuildCodexAppCommandAppendsForwardedArgs(t *testing.T) {
 	}
 }
 
+func TestBuildCodexAppCommandAppliesSandboxBeforeSubcommand(t *testing.T) {
+	got := buildCodexAppCommand(Options{
+		CodexArgs: []string{"--search"},
+		Sandbox:   "danger-full-access",
+	})
+	want := []string{"codex", "--search", "--sandbox=danger-full-access", "app-server"}
+	if len(got) != len(want) {
+		t.Fatalf("buildCodexAppCommand() = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("buildCodexAppCommand() = %#v, want %#v", got, want)
+		}
+	}
+}
+
 func TestValidateAppServerFactoryReturnsIdentityAndFinalizesBackend(t *testing.T) {
 	t.Parallel()
 
