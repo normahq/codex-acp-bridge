@@ -62,6 +62,7 @@ const (
 type codexACPConnection interface {
 	SessionUpdate(ctx context.Context, params acp.SessionNotification) error
 	RequestPermission(ctx context.Context, params acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error)
+	UnstableCreateElicitation(ctx context.Context, params acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error)
 }
 
 type codexACPProxyAgent struct {
@@ -75,9 +76,11 @@ type codexACPProxyAgent struct {
 	reasoningStreaming bool
 	reasoningThoughts  string
 	reasoningSummary   string
+	mcpApprovalPolicy  MCPApprovalPolicy
 
-	connMu sync.RWMutex
-	conn   codexACPConnection
+	connMu             sync.RWMutex
+	conn               codexACPConnection
+	clientCapabilities acp.ClientCapabilities
 
 	mu           sync.Mutex
 	sessions     map[acp.SessionId]*codexProxySessionState
@@ -133,13 +136,19 @@ type codexProxySessionState struct {
 
 	workerCancel context.CancelFunc
 
-	agentMessageItems map[string]agentMessageItemState
-	reasoningItems    map[string]reasoningItemState
-	planItems         map[string]planItemState
-	planOrder         []string
-	pendingRequests   map[string]string
-	latestRateLimits  map[string]any
-	latestUsage       map[string]any
+	agentMessageItems   map[string]agentMessageItemState
+	reasoningItems      map[string]reasoningItemState
+	planItems           map[string]planItemState
+	planOrder           []string
+	pendingRequests     map[string]string
+	pendingMCPToolCalls map[string]pendingMCPToolCall
+	latestRateLimits    map[string]any
+	latestUsage         map[string]any
+}
+
+type pendingMCPToolCall struct {
+	itemID string
+	tool   string
 }
 
 type sessionMCPStartup struct {
@@ -167,6 +176,7 @@ func newCodexACPProxyAgent(
 		reasoningStreaming: true,
 		reasoningThoughts:  defaultReasoningThoughts,
 		reasoningSummary:   defaultReasoningSummary,
+		mcpApprovalPolicy:  defaultMCPApprovalPolicy,
 		sessions:           make(map[acp.SessionId]*codexProxySessionState),
 	}
 }
@@ -176,6 +186,7 @@ func (a *codexACPProxyAgent) setBridgeOptions(opts Options) {
 	a.reasoningStreaming = opts.reasoningStreamingEnabled()
 	a.reasoningThoughts = opts.reasoningThoughtsMode()
 	a.reasoningSummary = opts.reasoningSummaryMode()
+	a.mcpApprovalPolicy = opts.mcpApprovalPolicy()
 }
 
 func (a *codexACPProxyAgent) setConnection(conn codexACPConnection) {
@@ -212,7 +223,10 @@ func (a *codexACPProxyAgent) Logout(_ context.Context, _ acp.LogoutRequest) (acp
 	return acp.LogoutResponse{}, nil
 }
 
-func (a *codexACPProxyAgent) Initialize(_ context.Context, _ acp.InitializeRequest) (acp.InitializeResponse, error) {
+func (a *codexACPProxyAgent) Initialize(_ context.Context, params acp.InitializeRequest) (acp.InitializeResponse, error) {
+	a.mu.Lock()
+	a.clientCapabilities = params.ClientCapabilities
+	a.mu.Unlock()
 	authDescription := "Authenticate with the native Codex login flow"
 	return acp.InitializeResponse{
 		ProtocolVersion: acp.ProtocolVersionNumber,
@@ -266,6 +280,7 @@ func (a *codexACPProxyAgent) Cancel(ctx context.Context, params acp.CancelNotifi
 	if cancel != nil {
 		cancel()
 	}
+	a.clearPendingMCPToolCalls(params.SessionId)
 	if backend != nil {
 		_ = backend.TurnInterrupt(ctx, threadID, turnID)
 	}
@@ -639,12 +654,13 @@ func newSessionState(
 	reasoningEffort *string,
 ) *codexProxySessionState {
 	state := &codexProxySessionState{
-		cwd:        strings.TrimSpace(cwd),
-		config:     sessionConfig,
-		threadID:   strings.TrimSpace(thread.ID),
-		model:      sessionConfig.Model,
-		mcpServers: mcpServers,
-		backend:    backend,
+		cwd:                 strings.TrimSpace(cwd),
+		config:              sessionConfig,
+		threadID:            strings.TrimSpace(thread.ID),
+		model:               sessionConfig.Model,
+		mcpServers:          mcpServers,
+		backend:             backend,
+		pendingMCPToolCalls: make(map[string]pendingMCPToolCall),
 	}
 	if strings.TrimSpace(state.model) == "" {
 		state.model = strings.TrimSpace(model)
@@ -1629,6 +1645,9 @@ func (a *codexACPProxyAgent) handleNotification(
 			a.noteReasoningStarted(sessionID, item)
 			return false, "", nil, nil, nil
 		}
+		if itemType == itemTypeMCPToolCall {
+			a.notePendingMCPToolCall(sessionID, stringValue(item, "server"), itemID, stringValue(item, "tool"))
+		}
 		if !isToolLifecycleItemType(itemType) {
 			return false, "", nil, nil, nil
 		}
@@ -1673,6 +1692,9 @@ func (a *codexACPProxyAgent) handleNotification(
 		itemID := stringValue(item, "id")
 		if itemID == "" {
 			return false, "", nil, nil, nil
+		}
+		if itemType == itemTypeMCPToolCall {
+			a.clearPendingMCPToolCall(sessionID, stringValue(item, "server"))
 		}
 		status := toACPToolCallStatus(stringValue(item, "status"))
 		update := acp.UpdateToolCall(
@@ -1835,6 +1857,7 @@ func (a *codexACPProxyAgent) handleNotification(
 		if ok {
 			a.resolvePendingRequest(sessionID, requestID)
 		}
+		a.clearPendingMCPToolCalls(sessionID)
 	case "mcpServer/startupStatus/updated":
 		name := stringValue(params, "name")
 		status := stringValue(params, "status")
@@ -2017,30 +2040,14 @@ func (a *codexACPProxyAgent) handleServerRequest(ctx context.Context, sessionID 
 		return backend.RespondRequest(ctx, req, map[string]any{"answers": answers})
 	case "mcpServer/elicitation/request":
 		params, _ := decodeJSONMap(req.Params)
-		decision, err := a.requestDecision(ctx, sessionID, "MCP elicitation request", acp.ToolKindOther, params, nil, []any{decisionAccept, decisionDecline, decisionCancel})
-		if err != nil {
-			return err
+		if stringValue(params, "mode") == mcpElicitationModeOpenAIForm {
+			a.logger.Warn().Str("server", stringValue(params, "serverName")).Msg("unsupported MCP openai/form elicitation")
+			return backend.RespondRequest(ctx, req, mcpElicitationResponse(decisionCancel, ""))
 		}
-		decisionName, _ := decision.(string)
-		action := decisionCancel
-		switch decisionName {
-		case decisionAccept, decisionAcceptForSession:
-			action = decisionAccept
-		case decisionDecline:
-			action = decisionDecline
-		case decisionCancel:
-			action = decisionCancel
+		if isMCPToolApproval(params) {
+			return a.handleMCPToolApproval(ctx, sessionID, backend, req, params)
 		}
-		resp := map[string]any{
-			"action": action,
-		}
-		if action == decisionAccept {
-			resp["content"] = map[string]any{}
-		}
-		if meta, ok := params["_meta"]; ok {
-			resp["_meta"] = meta
-		}
-		return backend.RespondRequest(ctx, req, resp)
+		return backend.RespondRequest(ctx, req, a.forwardMCPElicitation(ctx, req, params))
 	case "applyPatchApproval":
 		params, _ := decodeJSONMap(req.Params)
 		decision, err := a.requestDecision(ctx, sessionID, "Patch approval", acp.ToolKindEdit, params, nil, []any{decisionAccept, decisionAcceptForSession, decisionDecline, decisionCancel})
@@ -2082,6 +2089,249 @@ func (a *codexACPProxyAgent) handleServerRequest(ctx context.Context, sessionID 
 		return backend.RespondRequest(ctx, req, resp)
 	default:
 		return a.respondWithFallback(ctx, backend, req)
+	}
+}
+
+const (
+	mcpElicitationModeForm       = "form"
+	mcpElicitationModeOpenAIForm = "openai/form"
+
+	mcpApprovalOptionAllowOnce    acp.PermissionOptionId = "mcp-allow-once"
+	mcpApprovalOptionAllowSession acp.PermissionOptionId = "mcp-allow-session"
+	mcpApprovalOptionAllowAlways  acp.PermissionOptionId = "mcp-allow-always"
+	mcpApprovalOptionDecline      acp.PermissionOptionId = "mcp-decline"
+)
+
+func isMCPToolApproval(params map[string]any) bool {
+	mode := stringValue(params, "mode")
+	return (mode == mcpElicitationModeForm || mode == mcpElicitationModeOpenAIForm) &&
+		stringValue(mapValue(params, "_meta"), "codex_approval_kind") == "mcp_tool_call"
+}
+
+func (a *codexACPProxyAgent) handleMCPToolApproval(
+	ctx context.Context,
+	sessionID acp.SessionId,
+	backend appServerSession,
+	req *appServerRequest,
+	params map[string]any,
+) error {
+	policy := a.mcpApprovalPolicy
+	serverName := stringValue(params, "serverName")
+	toolName := a.pendingMCPToolName(sessionID, serverName)
+	switch policy {
+	case MCPApprovalPolicyAllow:
+		a.logMCPApprovalDecision(policy, decisionAccept, sessionID, params, toolName)
+		a.clearPendingMCPToolCall(sessionID, serverName)
+		return backend.RespondRequest(ctx, req, mcpElicitationResponse(decisionAccept, ""))
+	case MCPApprovalPolicyDeny:
+		a.logMCPApprovalDecision(policy, decisionDecline, sessionID, params, toolName)
+		a.clearPendingMCPToolCall(sessionID, serverName)
+		return backend.RespondRequest(ctx, req, mcpElicitationResponse(decisionDecline, ""))
+	case MCPApprovalPolicyAsk:
+		return backend.RespondRequest(ctx, req, a.askMCPToolApproval(ctx, sessionID, req, params))
+	default:
+		return backend.RespondRequest(ctx, req, mcpElicitationResponse(decisionCancel, ""))
+	}
+}
+
+func (a *codexACPProxyAgent) askMCPToolApproval(ctx context.Context, sessionID acp.SessionId, req *appServerRequest, params map[string]any) map[string]any {
+	a.connMu.RLock()
+	conn := a.conn
+	a.connMu.RUnlock()
+	if conn == nil {
+		return mcpElicitationResponse(decisionCancel, "")
+	}
+
+	options := mcpApprovalOptions(mapValue(params, "_meta"))
+	request := acp.RequestPermissionRequest{
+		SessionId: sessionID,
+		ToolCall: acp.ToolCallUpdate{
+			ToolCallId: a.mcpApprovalToolCallID(sessionID, req, params),
+			Title:      acp.Ptr("MCP tool-call approval"),
+			Kind:       acp.Ptr(acp.ToolKindOther),
+			Content:    mcpApprovalContent(params),
+			RawInput:   params,
+			Status:     acp.Ptr(acp.ToolCallStatusPending),
+		},
+		Options: options,
+	}
+	response, err := conn.RequestPermission(ctx, request)
+	if err != nil || response.Outcome.Selected == nil {
+		return mcpElicitationResponse(decisionCancel, "")
+	}
+
+	switch response.Outcome.Selected.OptionId {
+	case mcpApprovalOptionAllowOnce:
+		return mcpElicitationResponse(decisionAccept, "")
+	case mcpApprovalOptionAllowSession:
+		return mcpElicitationResponse(decisionAccept, "session")
+	case mcpApprovalOptionAllowAlways:
+		return mcpElicitationResponse(decisionAccept, "always")
+	case mcpApprovalOptionDecline:
+		return mcpElicitationResponse(decisionDecline, "")
+	default:
+		return mcpElicitationResponse(decisionCancel, "")
+	}
+}
+
+func (a *codexACPProxyAgent) mcpApprovalToolCallID(sessionID acp.SessionId, req *appServerRequest, params map[string]any) acp.ToolCallId {
+	serverName := stringValue(params, "serverName")
+	a.mu.Lock()
+	itemID := ""
+	if state := a.sessions[sessionID]; state != nil {
+		itemID = state.pendingMCPToolCalls[serverName].itemID
+		delete(state.pendingMCPToolCalls, serverName)
+	}
+	a.mu.Unlock()
+	if itemID != "" {
+		return toolCallID(itemID)
+	}
+	requestID := ""
+	if req != nil {
+		requestID = canonicalRequestID(req.ID)
+	}
+	return syntheticToolCallID("mcp-elicitation", requestID)
+}
+
+func mcpApprovalOptions(meta map[string]any) []acp.PermissionOption {
+	options := []acp.PermissionOption{
+		{OptionId: mcpApprovalOptionAllowOnce, Name: "Allow once", Kind: acp.PermissionOptionKindAllowOnce},
+	}
+	if mcpApprovalPersistSupported(meta, "session") {
+		options = append(options, acp.PermissionOption{OptionId: mcpApprovalOptionAllowSession, Name: "Allow for this session", Kind: acp.PermissionOptionKindAllowAlways})
+	}
+	if mcpApprovalPersistSupported(meta, "always") {
+		options = append(options, acp.PermissionOption{OptionId: mcpApprovalOptionAllowAlways, Name: "Allow and don't ask again", Kind: acp.PermissionOptionKindAllowAlways})
+	}
+	return append(options, acp.PermissionOption{OptionId: mcpApprovalOptionDecline, Name: "Decline", Kind: acp.PermissionOptionKindRejectOnce})
+}
+
+func mcpApprovalPersistSupported(meta map[string]any, scope string) bool {
+	switch value := meta["persist"].(type) {
+	case string:
+		return value == scope
+	case []any:
+		for _, item := range value {
+			if item == scope {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func mcpElicitationResponse(action, persist string) map[string]any {
+	response := map[string]any{"action": action, "content": nil, "_meta": nil}
+	if persist != "" {
+		response["_meta"] = map[string]any{"persist": persist}
+	}
+	return response
+}
+
+func mcpApprovalContent(params map[string]any) []acp.ToolCallContent {
+	message := strings.TrimSpace(stringValue(params, "message"))
+	if message == "" {
+		return nil
+	}
+	return []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(message))}
+}
+
+func (a *codexACPProxyAgent) logMCPApprovalDecision(policy MCPApprovalPolicy, decision string, sessionID acp.SessionId, params map[string]any, toolName string) {
+	a.logger.Info().
+		Str("policy", string(policy)).
+		Str("decision", decision).
+		Str("session_id", string(sessionID)).
+		Str("thread_id", stringValue(params, "threadId")).
+		Str("server", stringValue(params, "serverName")).
+		Str("tool", toolName).
+		Msg("mcp approval decision")
+}
+
+func (a *codexACPProxyAgent) forwardMCPElicitation(ctx context.Context, req *appServerRequest, params map[string]any) map[string]any {
+	mode := stringValue(params, "mode")
+	if !a.supportsMCPElicitation(mode) {
+		a.logger.Warn().Str("mode", mode).Str("server", stringValue(params, "serverName")).Msg("MCP elicitation is unsupported by ACP client")
+		return mcpElicitationResponse(decisionCancel, "")
+	}
+	a.connMu.RLock()
+	conn := a.conn
+	a.connMu.RUnlock()
+	if conn == nil {
+		return mcpElicitationResponse(decisionCancel, "")
+	}
+	request, ok := mcpElicitationRequest(req, params)
+	if !ok {
+		a.logger.Warn().Str("mode", mode).Str("server", stringValue(params, "serverName")).Msg("invalid MCP elicitation payload")
+		return mcpElicitationResponse(decisionCancel, "")
+	}
+	response, err := conn.UnstableCreateElicitation(ctx, request)
+	if err != nil {
+		return mcpElicitationResponse(decisionCancel, "")
+	}
+	return mcpElicitationResponseFromACP(response)
+}
+
+func (a *codexACPProxyAgent) supportsMCPElicitation(mode string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.clientCapabilities.Elicitation == nil {
+		return false
+	}
+	switch mode {
+	case mcpElicitationModeForm:
+		return a.clientCapabilities.Elicitation.Form != nil
+	case "url":
+		return a.clientCapabilities.Elicitation.Url != nil
+	default:
+		return false
+	}
+}
+
+func mcpElicitationRequest(req *appServerRequest, params map[string]any) (acp.UnstableCreateElicitationRequest, bool) {
+	mode := stringValue(params, "mode")
+	message := stringValue(params, "message")
+	if message == "" {
+		return acp.UnstableCreateElicitationRequest{}, false
+	}
+	meta := cloneAnyMap(mapValue(params, "_meta"))
+	elicitationID := "mcp-elicitation"
+	if req != nil {
+		if requestID := canonicalRequestID(req.ID); requestID != "" {
+			elicitationID = requestID
+		}
+	}
+	switch mode {
+	case mcpElicitationModeForm:
+		rawSchema, err := json.Marshal(params["requestedSchema"])
+		if err != nil {
+			return acp.UnstableCreateElicitationRequest{}, false
+		}
+		var schema acp.UnstableElicitationSchema
+		if err := json.Unmarshal(rawSchema, &schema); err != nil {
+			return acp.UnstableCreateElicitationRequest{}, false
+		}
+		return acp.UnstableCreateElicitationRequest{Form: &acp.UnstableCreateElicitationForm{Meta: meta, Message: message, Mode: mode, RequestedSchema: schema}}, true
+	case "url":
+		url := stringValue(params, "url")
+		if url == "" {
+			return acp.UnstableCreateElicitationRequest{}, false
+		}
+		return acp.UnstableCreateElicitationRequest{Url: &acp.UnstableCreateElicitationUrl{Meta: meta, ElicitationId: acp.UnstableElicitationId(elicitationID), Message: message, Mode: mode, Url: url}}, true
+	default:
+		return acp.UnstableCreateElicitationRequest{}, false
+	}
+}
+
+func mcpElicitationResponseFromACP(response acp.UnstableCreateElicitationResponse) map[string]any {
+	switch {
+	case response.Accept != nil:
+		return map[string]any{"action": decisionAccept, "content": response.Accept.Content, "_meta": response.Accept.Meta}
+	case response.Decline != nil:
+		return map[string]any{"action": decisionDecline, "content": nil, "_meta": response.Decline.Meta}
+	case response.Cancel != nil:
+		return map[string]any{"action": decisionCancel, "content": nil, "_meta": response.Cancel.Meta}
+	default:
+		return mcpElicitationResponse(decisionCancel, "")
 	}
 }
 
@@ -2831,6 +3081,7 @@ func (a *codexACPProxyAgent) resetTurnState(sessionID acp.SessionId) {
 		state.planItems = make(map[string]planItemState)
 		state.planOrder = nil
 		state.pendingRequests = make(map[string]string)
+		state.pendingMCPToolCalls = make(map[string]pendingMCPToolCall)
 		state.latestUsage = nil
 	}
 }
@@ -3718,6 +3969,48 @@ func (a *codexACPProxyAgent) clearPendingRequests(sessionID acp.SessionId) {
 		return
 	}
 	state.pendingRequests = make(map[string]string)
+	state.pendingMCPToolCalls = make(map[string]pendingMCPToolCall)
+}
+
+func (a *codexACPProxyAgent) notePendingMCPToolCall(sessionID acp.SessionId, serverName, itemID, toolName string) {
+	serverName = strings.TrimSpace(serverName)
+	itemID = strings.TrimSpace(itemID)
+	if serverName == "" || itemID == "" {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if state := a.sessions[sessionID]; state != nil {
+		if state.pendingMCPToolCalls == nil {
+			state.pendingMCPToolCalls = make(map[string]pendingMCPToolCall)
+		}
+		state.pendingMCPToolCalls[serverName] = pendingMCPToolCall{itemID: itemID, tool: strings.TrimSpace(toolName)}
+	}
+}
+
+func (a *codexACPProxyAgent) pendingMCPToolName(sessionID acp.SessionId, serverName string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if state := a.sessions[sessionID]; state != nil {
+		return state.pendingMCPToolCalls[strings.TrimSpace(serverName)].tool
+	}
+	return ""
+}
+
+func (a *codexACPProxyAgent) clearPendingMCPToolCall(sessionID acp.SessionId, serverName string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if state := a.sessions[sessionID]; state != nil {
+		delete(state.pendingMCPToolCalls, strings.TrimSpace(serverName))
+	}
+}
+
+func (a *codexACPProxyAgent) clearPendingMCPToolCalls(sessionID acp.SessionId) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if state := a.sessions[sessionID]; state != nil {
+		state.pendingMCPToolCalls = make(map[string]pendingMCPToolCall)
+	}
 }
 
 func requestIDFromAny(value any) (string, bool) {

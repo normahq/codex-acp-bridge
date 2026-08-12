@@ -99,3 +99,35 @@ func TestOptionsValidateRejectsInvalidSandbox(t *testing.T) {
 		t.Fatal("validate() error = nil, want invalid sandbox error")
 	}
 }
+
+func TestMCPApprovalPolicyDefaultsAndValidates(t *testing.T) {
+	if got, want := (Options{}).mcpApprovalPolicy(), MCPApprovalPolicyAsk; got != want {
+		t.Fatalf("mcpApprovalPolicy() = %q, want %q", got, want)
+	}
+	for _, policy := range []MCPApprovalPolicy{MCPApprovalPolicyAsk, MCPApprovalPolicyAllow, MCPApprovalPolicyDeny} {
+		if err := (Options{MCPApprovalPolicy: policy}).validate(); err != nil {
+			t.Fatalf("validate(%q) error = %v, want nil", policy, err)
+		}
+	}
+	if err := (Options{MCPApprovalPolicy: "prompt"}).validate(); err == nil {
+		t.Fatal("validate(prompt) error = nil, want invalid policy error")
+	} else if got, want := err.Error(), "invalid value \"prompt\" for --mcp-approval-policy:\nexpected ask, allow, or deny"; got != want {
+		t.Fatalf("validate(prompt) error = %q, want %q", got, want)
+	}
+}
+
+func TestMCPApprovalPolicyIsIndependentOfSandbox(t *testing.T) {
+	for _, sandbox := range []string{"read-only", "workspace-write", "danger-full-access"} {
+		for _, policy := range []MCPApprovalPolicy{MCPApprovalPolicyAsk, MCPApprovalPolicyAllow, MCPApprovalPolicyDeny} {
+			t.Run(sandbox+"/"+string(policy), func(t *testing.T) {
+				opts := Options{Sandbox: sandbox, MCPApprovalPolicy: policy}
+				if err := opts.validate(); err != nil {
+					t.Fatalf("validate() error = %v", err)
+				}
+				if got := opts.mcpApprovalPolicy(); got != policy {
+					t.Fatalf("mcpApprovalPolicy() = %q, want %q", got, policy)
+				}
+			})
+		}
+	}
+}

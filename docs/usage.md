@@ -71,6 +71,15 @@ acp-repl -- codex-acp-bridge
 - `--reasoning-thoughts`:
   Select which reasoning lane is projected as ACP thoughts: `off`, `summary`, `content`, or `both`.
   Default: `summary`. If app-server completes a reasoning item with no summary text but with raw content, summary mode emits that completed content as a fallback thought.
+- `--mcp-approval-policy`:
+  Process-wide policy for MCP tool-call approval forms: `ask`, `allow`, or `deny`.
+  Default: `ask`. This policy is independent of `--sandbox`: it controls only MCP
+  tool-call approval elicitation, not Codex filesystem or network sandboxing.
+  `allow` accepts without an ACP permission request, `deny` declines, and `ask`
+  offers ACP permission choices, including advertised persistence scopes.
+  Ordinary MCP `form` and `url` elicitation is forwarded only when the ACP client
+  advertises that capability. The v1 bridge cancels `openai/form` elicitation
+  with a diagnostic.
 - `--codex-args`:
   Repeatable additional global Codex argument inserted before the `app-server`
   subcommand.

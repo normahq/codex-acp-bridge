@@ -62,6 +62,9 @@ func RunProxy(ctx context.Context, workingDir string, opts Options, stdin io.Rea
 		Str("cmd", cmdName).
 		Strs("args", cmdArgs).
 		Msg("starting codex acp bridge")
+	logger.Info().
+		Str("mcp_approval_policy", string(opts.mcpApprovalPolicy())).
+		Msg("mcp approval policy configured")
 
 	sessionFactory := func(factoryCtx context.Context, sessionCWD string) (appServerSession, error) {
 		return connectAppServerBackend(ctx, factoryCtx, workingDir, sessionCWD, command, bridgeClientName, lockedStderr, logger, opts)

@@ -69,7 +69,7 @@ func TestCommandExposesBridgeFlags(t *testing.T) {
 			t.Fatalf("flag %q unexpectedly present", removedFlag)
 		}
 	}
-	for _, expectedFlag := range []string{"name", "defer-backend", "message-streaming", "reasoning-streaming", "reasoning-thoughts", "reasoning-summary", "codex-args", "sandbox", "debug"} {
+	for _, expectedFlag := range []string{"name", "defer-backend", "message-streaming", "reasoning-streaming", "reasoning-thoughts", "reasoning-summary", "codex-args", "mcp-approval-policy", "sandbox", "debug"} {
 		if got := cmd.Flags().Lookup(expectedFlag); got == nil {
 			t.Fatalf("flag %q missing", expectedFlag)
 		}
@@ -130,7 +130,7 @@ func TestCommandPassesCodexArgsAndSandboxToRunProxy(t *testing.T) {
 	}
 
 	cmd := New()
-	cmd.SetArgs([]string{"--sandbox=danger-full-access", "--codex-args=--search"})
+	cmd.SetArgs([]string{"--sandbox=danger-full-access", "--codex-args=--search", "--mcp-approval-policy=allow"})
 	cmd.SetIn(strings.NewReader(""))
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
@@ -146,6 +146,9 @@ func TestCommandPassesCodexArgsAndSandboxToRunProxy(t *testing.T) {
 	}
 	if gotOpts.Sandbox != "danger-full-access" {
 		t.Fatalf("Sandbox = %q, want %q", gotOpts.Sandbox, "danger-full-access")
+	}
+	if gotOpts.MCPApprovalPolicy != codexacpbridge.MCPApprovalPolicyAllow {
+		t.Fatalf("MCPApprovalPolicy = %q, want %q", gotOpts.MCPApprovalPolicy, "allow")
 	}
 }
 

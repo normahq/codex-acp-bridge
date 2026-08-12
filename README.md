@@ -95,6 +95,9 @@ Common flags:
 - `--reasoning-streaming`: stream Codex reasoning text deltas live; when disabled, raw/content token deltas stay off, while summary thoughts still publish incrementally on completed summary parts. Default: `true`.
 - `--reasoning-summary`: app-server reasoning summary level to request: `auto`, `concise`, `detailed`, or `none`. Default: `auto`.
 - `--reasoning-thoughts`: reasoning lane projected as ACP thoughts: `off`, `summary`, `content`, or `both`. Default: `summary`; when no summary is available, completed raw content is emitted as a fallback thought.
+- `--mcp-approval-policy`: process-wide policy for MCP tool-call approval prompts: `ask`, `allow`, or `deny`. Default: `ask`. It is separate from `--sandbox`: `allow` accepts the MCP tool call without an ACP permission request, `deny` declines it, and `ask` presents ACP permission options when the client supports them.
+
+Ordinary MCP `form` and `url` elicitations are forwarded as ACP elicitations only when the ACP client advertises the corresponding capability. The v1 bridge cancels `openai/form` elicitation with a diagnostic.
 - `--sandbox`: Codex sandbox mode applied both to the `codex` CLI invocation and as the default for ACP `thread/start` and `thread/resume`: `read-only`, `workspace-write`, or `danger-full-access`.
 - `--codex-args`: repeatable additional global Codex argument inserted before `app-server`.
 - `--debug`: enable debug logging.
@@ -108,6 +111,7 @@ codex-acp-bridge --message-streaming
 codex-acp-bridge --reasoning-thoughts=both
 codex-acp-bridge --reasoning-summary=detailed
 codex-acp-bridge --reasoning-streaming=false
+codex-acp-bridge --mcp-approval-policy=allow
 codex-acp-bridge --sandbox=workspace-write
 codex-acp-bridge --debug
 ```

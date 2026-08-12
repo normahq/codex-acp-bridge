@@ -4167,12 +4167,16 @@ func TestPromptBridgesMcpElicitationRequest(t *testing.T) {
 		permissionResponse: acp.RequestPermissionResponse{
 			Outcome: acp.NewRequestPermissionOutcomeSelected("opt-1"),
 		},
+		elicitationResponse: acp.UnstableCreateElicitationResponse{
+			Accept: &acp.UnstableCreateElicitationAccept{Action: decisionAccept, Content: map[string]any{}},
+		},
 	}
 	l := zerolog.Nop()
 	agent := newCodexACPProxyAgent(func(context.Context, string) (appServerSession, error) {
 		return session, nil
 	}, "agent", codexAppConfig{}, &l)
 	agent.setConnection(conn)
+	_, _ = agent.Initialize(context.Background(), acp.InitializeRequest{ClientCapabilities: acp.ClientCapabilities{Elicitation: &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}}})
 
 	newResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/tmp/work"})
 	if err != nil {
@@ -4197,6 +4201,225 @@ func TestPromptBridgesMcpElicitationRequest(t *testing.T) {
 	}
 	if _, ok := responses[0]["_meta"]; !ok {
 		t.Fatalf("response._meta missing passthrough: %#v", responses[0])
+	}
+}
+
+func TestMCPToolApprovalPolicies(t *testing.T) {
+	tests := []struct {
+		name             string
+		policy           MCPApprovalPolicy
+		permissionResult acp.RequestPermissionResponse
+		wantAction       string
+		wantPersist      string
+		wantRequests     int
+	}{
+		{
+			name:             "ask allows for session when advertised",
+			policy:           MCPApprovalPolicyAsk,
+			permissionResult: acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(mcpApprovalOptionAllowSession)},
+			wantAction:       decisionAccept,
+			wantPersist:      "session",
+			wantRequests:     1,
+		},
+		{
+			name:         "allow automatically accepts",
+			policy:       MCPApprovalPolicyAllow,
+			wantAction:   decisionAccept,
+			wantRequests: 0,
+		},
+		{
+			name:         "deny automatically declines",
+			policy:       MCPApprovalPolicyDeny,
+			wantAction:   decisionDecline,
+			wantRequests: 0,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+			conn := &fakeACPAppConnection{permissionResponse: test.permissionResult}
+			logger := zerolog.Nop()
+			agent := newCodexACPProxyAgent(nil, "agent", codexAppConfig{}, &logger)
+			agent.mcpApprovalPolicy = test.policy
+			agent.setConnection(conn)
+			params := map[string]any{
+				"serverName": "knowl",
+				"threadId":   "thr-1",
+				"mode":       "form",
+				"message":    "Allow knowl to run tool?",
+				"_meta": map[string]any{
+					"codex_approval_kind": "mcp_tool_call",
+					"persist":             []any{"session", "always"},
+				},
+			}
+			if err := agent.handleMCPToolApproval(context.Background(), "session-1", session, &appServerRequest{}, params); err != nil {
+				t.Fatalf("handleMCPToolApproval() error = %v", err)
+			}
+
+			responses := session.responsesSnapshot()
+			if got, want := len(responses), 1; got != want {
+				t.Fatalf("responses = %d, want %d", got, want)
+			}
+			if got := stringValue(responses[0], "action"); got != test.wantAction {
+				t.Fatalf("response.action = %q, want %q", got, test.wantAction)
+			}
+			meta := mapValue(responses[0], "_meta")
+			if got := stringValue(meta, "persist"); got != test.wantPersist {
+				t.Fatalf("response._meta.persist = %q, want %q", got, test.wantPersist)
+			}
+			if got := len(conn.permissionRequests); got != test.wantRequests {
+				t.Fatalf("permission requests = %d, want %d", got, test.wantRequests)
+			}
+			if test.wantRequests == 1 {
+				gotOptions := conn.permissionRequests[0].Options
+				if got, want := len(gotOptions), 4; got != want {
+					t.Fatalf("permission options = %d, want %d", got, want)
+				}
+				if got, want := gotOptions[0].OptionId, mcpApprovalOptionAllowOnce; got != want {
+					t.Fatalf("first option = %q, want %q", got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestMCPToolApprovalFailsClosed(t *testing.T) {
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	conn := &fakeACPAppConnection{permissionResponse: acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected("unexpected")}}
+	logger := zerolog.Nop()
+	agent := newCodexACPProxyAgent(nil, "agent", codexAppConfig{}, &logger)
+	agent.setConnection(conn)
+	params := map[string]any{
+		"mode": "form",
+		"_meta": map[string]any{
+			"codex_approval_kind": "mcp_tool_call",
+		},
+	}
+	if err := agent.handleMCPToolApproval(context.Background(), "session-1", session, &appServerRequest{}, params); err != nil {
+		t.Fatalf("handleMCPToolApproval() error = %v", err)
+	}
+	responses := session.responsesSnapshot()
+	if got := stringValue(responses[0], "action"); got != decisionCancel {
+		t.Fatalf("response.action = %q, want %q", got, decisionCancel)
+	}
+}
+
+func TestIsMCPToolApproval(t *testing.T) {
+	if !isMCPToolApproval(map[string]any{"mode": "form", "_meta": map[string]any{"codex_approval_kind": "mcp_tool_call"}}) {
+		t.Fatal("isMCPToolApproval() = false, want true")
+	}
+	if isMCPToolApproval(map[string]any{"mode": "url", "_meta": map[string]any{"codex_approval_kind": "mcp_tool_call"}}) {
+		t.Fatal("isMCPToolApproval(url) = true, want false")
+	}
+	if !isMCPToolApproval(map[string]any{"mode": "openai/form", "_meta": map[string]any{"codex_approval_kind": "mcp_tool_call"}}) {
+		t.Fatal("isMCPToolApproval(openai/form) = false, want true")
+	}
+}
+
+func TestForwardMCPElicitationRequiresCapabilityAndForwardsAcceptedForm(t *testing.T) {
+	logger := zerolog.Nop()
+	conn := &fakeACPAppConnection{elicitationResponse: acp.UnstableCreateElicitationResponse{
+		Accept: &acp.UnstableCreateElicitationAccept{Action: decisionAccept, Content: map[string]any{"project": "balda"}},
+	}}
+	agent := newCodexACPProxyAgent(nil, "agent", codexAppConfig{}, &logger)
+	agent.setConnection(conn)
+	params := map[string]any{"mode": "form", "message": "Project?", "requestedSchema": map[string]any{"type": "object"}}
+	if got := stringValue(agent.forwardMCPElicitation(context.Background(), nil, params), "action"); got != decisionCancel {
+		t.Fatalf("without capability action = %q, want %q", got, decisionCancel)
+	}
+	_, _ = agent.Initialize(context.Background(), acp.InitializeRequest{ClientCapabilities: acp.ClientCapabilities{Elicitation: &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}}})
+	response := agent.forwardMCPElicitation(context.Background(), nil, params)
+	if got := stringValue(response, "action"); got != decisionAccept {
+		t.Fatalf("with capability action = %q, want %q", got, decisionAccept)
+	}
+	if got, want := len(conn.elicitationRequests), 1; got != want {
+		t.Fatalf("elicitation requests = %d, want %d", got, want)
+	}
+}
+
+func TestForwardMCPElicitationForwardsURLAndCancelMetadata(t *testing.T) {
+	logger := zerolog.Nop()
+	conn := &fakeACPAppConnection{elicitationResponse: acp.UnstableCreateElicitationResponse{
+		Cancel: &acp.UnstableCreateElicitationCancel{Action: decisionCancel, Meta: map[string]any{"reason": "closed"}},
+	}}
+	agent := newCodexACPProxyAgent(nil, "agent", codexAppConfig{}, &logger)
+	agent.setConnection(conn)
+	_, _ = agent.Initialize(context.Background(), acp.InitializeRequest{ClientCapabilities: acp.ClientCapabilities{Elicitation: &acp.ElicitationCapabilities{Url: &acp.ElicitationUrlCapabilities{}}}})
+	response := agent.forwardMCPElicitation(context.Background(), &appServerRequest{ID: json.RawMessage("17")}, map[string]any{"mode": "url", "message": "Log in", "url": "https://example.test/login"})
+	if got := stringValue(response, "action"); got != decisionCancel {
+		t.Fatalf("response.action = %q, want %q", got, decisionCancel)
+	}
+	if got := stringValue(mapValue(response, "_meta"), "reason"); got != "closed" {
+		t.Fatalf("response._meta.reason = %q, want %q", got, "closed")
+	}
+	if got, want := conn.elicitationRequests[0].Url.ElicitationId, acp.UnstableElicitationId("17"); got != want {
+		t.Fatalf("URL elicitation ID = %q, want %q", got, want)
+	}
+}
+
+func TestOpenAIFormElicitationCancelsWithoutPermissionRequest(t *testing.T) {
+	logger := zerolog.Nop()
+	conn := &fakeACPAppConnection{}
+	agent := newCodexACPProxyAgent(nil, "agent", codexAppConfig{}, &logger)
+	agent.mcpApprovalPolicy = MCPApprovalPolicyAllow
+	agent.setConnection(conn)
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	agent.sessions["session-1"] = &codexProxySessionState{backend: session}
+	params, err := json.Marshal(map[string]any{"mode": "openai/form", "_meta": map[string]any{"codex_approval_kind": "mcp_tool_call"}})
+	if err != nil {
+		t.Fatalf("marshal params: %v", err)
+	}
+	if err := agent.handleServerRequest(context.Background(), "session-1", &appServerRequest{Method: "mcpServer/elicitation/request", Params: params}); err != nil {
+		t.Fatalf("handleServerRequest() error = %v", err)
+	}
+	responses := session.responsesSnapshot()
+	if got := stringValue(responses[0], "action"); got != decisionCancel {
+		t.Fatalf("response.action = %q, want %q", got, decisionCancel)
+	}
+	if got := len(conn.permissionRequests); got != 0 {
+		t.Fatalf("permission requests = %d, want 0", got)
+	}
+}
+
+func TestAutomaticMCPApprovalLogsToolWithoutArguments(t *testing.T) {
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs)
+	agent := newCodexACPProxyAgent(nil, "agent", codexAppConfig{}, &logger)
+	agent.mcpApprovalPolicy = MCPApprovalPolicyAllow
+	agent.sessions["session-1"] = &codexProxySessionState{pendingMCPToolCalls: map[string]pendingMCPToolCall{
+		"knowl": {itemID: "call-42", tool: "knowl_ingest"},
+	}}
+	session := newFakeAppServerSession("codex_test/1.0.0", "thr-1", "turn-1")
+	params := map[string]any{
+		"serverName": "knowl",
+		"threadId":   "thr-1",
+		"mode":       "form",
+		"arguments":  map[string]any{"token": "never-log-this"},
+		"_meta":      map[string]any{"codex_approval_kind": "mcp_tool_call"},
+	}
+	if err := agent.handleMCPToolApproval(context.Background(), "session-1", session, &appServerRequest{}, params); err != nil {
+		t.Fatalf("handleMCPToolApproval() error = %v", err)
+	}
+	got := logs.String()
+	if !strings.Contains(got, `"tool":"knowl_ingest"`) {
+		t.Fatalf("log does not contain tool: %s", got)
+	}
+	if strings.Contains(got, "never-log-this") || strings.Contains(got, `"arguments"`) {
+		t.Fatalf("log contains MCP arguments: %s", got)
+	}
+}
+
+func TestMCPApprovalUsesPendingToolCallCorrelation(t *testing.T) {
+	logger := zerolog.Nop()
+	agent := newCodexACPProxyAgent(nil, "agent", codexAppConfig{}, &logger)
+	agent.sessions["session-1"] = &codexProxySessionState{pendingMCPToolCalls: map[string]pendingMCPToolCall{"knowl": {itemID: "call-42", tool: "knowl_ingest"}}}
+	got := agent.mcpApprovalToolCallID("session-1", &appServerRequest{ID: json.RawMessage("7")}, map[string]any{"serverName": "knowl"})
+	if want := toolCallID("call-42"); got != want {
+		t.Fatalf("mcpApprovalToolCallID() = %q, want %q", got, want)
+	}
+	if got := agent.mcpApprovalToolCallID("session-1", &appServerRequest{ID: json.RawMessage("7")}, map[string]any{"serverName": "knowl"}); got == toolCallID("call-42") {
+		t.Fatalf("consumed correlation was reused: %q", got)
 	}
 }
 
@@ -4408,11 +4631,12 @@ func TestServerRequestResolvedClearsPendingRequest(t *testing.T) {
 		return nil, errors.New("not used")
 	}, "agent", codexAppConfig{}, &l)
 	agent.sessions[sessionID] = &codexProxySessionState{
-		threadID:         "thr-1",
-		turnID:           "turn-1",
-		pendingRequests:  map[string]string{"1": "item/tool/call"},
-		planItems:        map[string]planItemState{},
-		latestRateLimits: map[string]any{},
+		threadID:            "thr-1",
+		turnID:              "turn-1",
+		pendingRequests:     map[string]string{"1": "item/tool/call"},
+		pendingMCPToolCalls: map[string]pendingMCPToolCall{"knowl": {itemID: "call-42", tool: "knowl_ingest"}},
+		planItems:           map[string]planItemState{},
+		latestRateLimits:    map[string]any{},
 	}
 
 	raw, err := json.Marshal(map[string]any{
@@ -4444,14 +4668,20 @@ func TestServerRequestResolvedClearsPendingRequest(t *testing.T) {
 	if got := len(agent.sessions[sessionID].pendingRequests); got != 0 {
 		t.Fatalf("pending requests = %d, want 0", got)
 	}
+	if got := len(agent.sessions[sessionID].pendingMCPToolCalls); got != 0 {
+		t.Fatalf("pending MCP tool calls = %d, want 0", got)
+	}
 }
 
 type fakeACPAppConnection struct {
-	mu                 sync.Mutex
-	permissionResponse acp.RequestPermissionResponse
-	permissionError    error
-	permissionRequests []acp.RequestPermissionRequest
-	updates            []acp.SessionNotification
+	mu                  sync.Mutex
+	permissionResponse  acp.RequestPermissionResponse
+	permissionError     error
+	permissionRequests  []acp.RequestPermissionRequest
+	updates             []acp.SessionNotification
+	elicitationResponse acp.UnstableCreateElicitationResponse
+	elicitationError    error
+	elicitationRequests []acp.UnstableCreateElicitationRequest
 }
 
 func (f *fakeACPAppConnection) SessionUpdate(_ context.Context, params acp.SessionNotification) error {
@@ -4477,6 +4707,16 @@ func (f *fakeACPAppConnection) RequestPermission(_ context.Context, params acp.R
 		return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeCancelled()}, nil
 	}
 	return f.permissionResponse, nil
+}
+
+func (f *fakeACPAppConnection) UnstableCreateElicitation(_ context.Context, params acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.elicitationRequests = append(f.elicitationRequests, params)
+	if f.elicitationError != nil {
+		return acp.UnstableCreateElicitationResponse{}, f.elicitationError
+	}
+	return f.elicitationResponse, nil
 }
 
 func (f *fakeACPAppConnection) sessionUpdates(sessionID acp.SessionId) []acp.SessionNotification {

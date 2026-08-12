@@ -167,6 +167,13 @@ func TestRunProxyRequiresIOStreams(t *testing.T) {
 	}
 }
 
+func TestRunProxyRejectsInvalidMCPApprovalPolicy(t *testing.T) {
+	err := RunProxy(context.Background(), "/tmp", Options{MCPApprovalPolicy: "prompt"}, strings.NewReader(""), io.Discard, io.Discard)
+	if got, want := err.Error(), "invalid value \"prompt\" for --mcp-approval-policy:\nexpected ask, allow, or deny"; got != want {
+		t.Fatalf("RunProxy() error = %q, want %q", got, want)
+	}
+}
+
 func TestRunProxyEagerModeRequiresCodex(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 

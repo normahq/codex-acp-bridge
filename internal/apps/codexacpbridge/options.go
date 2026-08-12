@@ -6,6 +6,11 @@ import (
 )
 
 var (
+	validMCPApprovalPolicies = map[string]struct{}{
+		string(MCPApprovalPolicyAsk):   {},
+		string(MCPApprovalPolicyAllow): {},
+		string(MCPApprovalPolicyDeny):  {},
+	}
 	validCodexSandboxModes = map[string]struct{}{
 		"read-only":          {},
 		"workspace-write":    {},
@@ -45,6 +50,13 @@ var (
 )
 
 const (
+	// MCPApprovalPolicy controls how the bridge settles MCP tool-call approvals.
+	MCPApprovalPolicyAsk   MCPApprovalPolicy = "ask"
+	MCPApprovalPolicyAllow MCPApprovalPolicy = "allow"
+	MCPApprovalPolicyDeny  MCPApprovalPolicy = "deny"
+
+	defaultMCPApprovalPolicy = MCPApprovalPolicyAsk
+
 	reasoningThoughtsOff     = "off"
 	reasoningThoughtsSummary = "summary"
 	reasoningThoughtsContent = "content"
@@ -57,6 +69,9 @@ const (
 	defaultReasoningSummary  = reasoningSummaryAuto
 )
 
+// MCPApprovalPolicy is the process-wide policy for MCP tool-call approvals.
+type MCPApprovalPolicy string
+
 // Options configures Codex bridge backend -> ACP proxy behavior.
 type Options struct {
 	Name               string
@@ -66,6 +81,7 @@ type Options struct {
 	ReasoningThoughts  string
 	ReasoningSummary   string
 	CodexArgs          []string
+	MCPApprovalPolicy  MCPApprovalPolicy
 	Sandbox            string
 
 	reasoningStreamingConfigured bool
@@ -110,6 +126,14 @@ func (o Options) appConfig() codexAppConfig {
 	return codexAppConfig{
 		Sandbox: strings.TrimSpace(o.Sandbox),
 	}
+}
+
+func (o Options) mcpApprovalPolicy() MCPApprovalPolicy {
+	policy := strings.TrimSpace(string(o.MCPApprovalPolicy))
+	if policy == "" {
+		return defaultMCPApprovalPolicy
+	}
+	return MCPApprovalPolicy(policy)
 }
 
 func (o *Options) SetReasoningStreaming(enabled bool) {
@@ -174,6 +198,11 @@ func (o Options) validate() error {
 	}
 	if err := validateEnumValue("Codex sandbox", o.Sandbox, validCodexSandboxModes); err != nil {
 		return err
+	}
+	if policy := o.mcpApprovalPolicy(); policy != "" {
+		if _, ok := validMCPApprovalPolicies[string(policy)]; !ok {
+			return fmt.Errorf("invalid value %q for --mcp-approval-policy:\nexpected ask, allow, or deny", policy)
+		}
 	}
 	return nil
 }

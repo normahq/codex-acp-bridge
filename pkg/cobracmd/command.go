@@ -28,6 +28,7 @@ func New() *cobra.Command {
 	reasoningStreaming := true
 	reasoningThoughts := "summary"
 	reasoningSummary := "auto"
+	mcpApprovalPolicy := "ask"
 
 	cmd := &cobra.Command{
 		Use:          "codex-acp-bridge [flags]",
@@ -43,6 +44,7 @@ func New() *cobra.Command {
 			runOpts.SetReasoningStreaming(reasoningStreaming)
 			runOpts.ReasoningThoughts = reasoningThoughts
 			runOpts.ReasoningSummary = reasoningSummary
+			runOpts.MCPApprovalPolicy = codexacpbridge.MCPApprovalPolicy(mcpApprovalPolicy)
 			if strings.TrimSpace(runOpts.Name) == "" {
 				runOpts.Name = bridgeDefaultAgentName
 			}
@@ -66,6 +68,7 @@ func New() *cobra.Command {
 	cmd.Flags().StringVar(&reasoningThoughts, "reasoning-thoughts", reasoningThoughts, "reasoning thought lane to project: off, summary, content, or both")
 	cmd.Flags().StringVar(&reasoningSummary, "reasoning-summary", reasoningSummary, "app-server reasoning summary level to request: auto, concise, detailed, or none")
 	cmd.Flags().StringArrayVar(&opts.CodexArgs, "codex-args", nil, "repeatable global argument inserted before the `app-server` subcommand")
+	cmd.Flags().StringVar(&mcpApprovalPolicy, "mcp-approval-policy", mcpApprovalPolicy, "MCP tool-call approval policy: ask, allow, or deny")
 	cmd.Flags().StringVar(&opts.Sandbox, "sandbox", "", "Codex sandbox mode applied to the CLI and ACP sessions: read-only, workspace-write, or danger-full-access")
 	cmd.Flags().BoolVar(&debugLogs, "debug", false, "enable debug logging")
 	cmd.Long = "Run the Codex bridge backend and expose it as an ACP agent over stdio. Configure per-session Codex behavior using ACP session/new _meta.codex."
@@ -78,6 +81,7 @@ func New() *cobra.Command {
   codex-acp-bridge --reasoning-thoughts=both
   codex-acp-bridge --reasoning-summary=detailed
   codex-acp-bridge --reasoning-streaming=false
+  codex-acp-bridge --mcp-approval-policy=allow
   codex-acp-bridge --sandbox=danger-full-access
   codex-acp-bridge --debug`
 	cmd.AddCommand(loginCommand(runCodexLogin), versionCommand())
