@@ -66,9 +66,12 @@ func RunProxy(ctx context.Context, workingDir string, opts Options, stdin io.Rea
 		Str("mcp_approval_policy", string(opts.mcpApprovalPolicy())).
 		Msg("mcp approval policy configured")
 
-	sessionFactory := func(factoryCtx context.Context, sessionCWD string) (appServerSession, error) {
+	backendFactory := func(factoryCtx context.Context, sessionCWD string) (appServerSession, error) {
 		return connectAppServerBackend(ctx, factoryCtx, workingDir, sessionCWD, command, bridgeClientName, lockedStderr, logger, opts)
 	}
+	sharedBackend := newSharedAppServerBackend(backendFactory)
+	defer func() { _ = sharedBackend.Close() }()
+	sessionFactory := sharedBackend.Session
 	var identity appServerIdentity
 	if !opts.DeferBackend {
 		var err error

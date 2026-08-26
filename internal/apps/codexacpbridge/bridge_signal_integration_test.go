@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -44,12 +45,29 @@ type fakeCodexHelperEnvelope struct {
 	Params json.RawMessage `json:"params,omitempty"`
 }
 
+type lockedBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.String()
+}
+
 func TestBridgeIntegrationDeferredBackendInitializesWithoutCodex(t *testing.T) {
 	workingDir := integrationWorkingDir(t)
 	binPath := buildIntegrationBridgeBinary(t, workingDir)
 	isolatedDir := t.TempDir()
 
-	var stderr bytes.Buffer
+	var stderr lockedBuffer
 	client, err := newIntegrationACPClient(context.Background(), integrationACPClientConfig{
 		Command:    []string{binPath, "--defer-backend"},
 		WorkingDir: workingDir,
@@ -157,6 +175,30 @@ func TestBridgeIntegrationACPStdioDisconnectTriggersBackendShutdown(t *testing.T
 	assertNoClosedPipeNoise(t, nil, stderr.String())
 }
 
+func TestBridgeIntegrationSharesOneBackendAcrossSessions(t *testing.T) {
+	workingDir := integrationWorkingDir(t)
+	binPath := buildIntegrationBridgeBinary(t, workingDir)
+	harness := newFakeCodexHelperHarness(t)
+
+	client, stderr := newHelperBackedACPClient(t, workingDir, binPath, harness, "steady")
+	helperMustInitialize(t, client, stderr)
+	first := helperMustNewSession(t, client, stderr, workingDir)
+	second := helperMustNewSession(t, client, stderr, workingDir)
+	if first.SessionId == second.SessionId {
+		t.Fatalf("session ids = %q and %q, want distinct Codex threads", first.SessionId, second.SessionId)
+	}
+
+	startCount := 0
+	for _, event := range harness.events(t) {
+		if event.Type == "start" {
+			startCount++
+		}
+	}
+	if startCount != 1 {
+		t.Fatalf("helper start event count = %d, want one shared app-server", startCount)
+	}
+}
+
 func TestBridgeIntegrationPromptRecreatesBackendAfterPrePromptBackendExit(t *testing.T) {
 	workingDir := integrationWorkingDir(t)
 	binPath := buildIntegrationBridgeBinary(t, workingDir)
@@ -194,8 +236,8 @@ func TestBridgeIntegrationPromptRecreatesBackendAfterPrePromptBackendExit(t *tes
 			startCount++
 		}
 	}
-	if startCount < 3 {
-		t.Fatalf("helper start event count = %d, want at least 3 (validation + failed session + recreated session)", startCount)
+	if startCount != 2 {
+		t.Fatalf("helper start event count = %d, want 2 (failed shared backend + recreated backend)", startCount)
 	}
 }
 
@@ -255,7 +297,7 @@ func newHelperBackedACPClient(
 	binPath string,
 	harness *fakeCodexHelperHarness,
 	mode string,
-) (*integrationACPClient, *bytes.Buffer) {
+) (*integrationACPClient, *lockedBuffer) {
 	t.Helper()
 
 	helperDir := installFakeCodexScript(t)
@@ -266,7 +308,7 @@ func newHelperBackedACPClient(
 		"FAKE_CODEX_MODE="+mode,
 	)
 
-	var stderr bytes.Buffer
+	var stderr lockedBuffer
 	client, err := newIntegrationACPClient(context.Background(), integrationACPClientConfig{
 		Command:    []string{binPath},
 		WorkingDir: workingDir,
@@ -294,7 +336,7 @@ func installFakeCodexScript(t *testing.T) string {
 	return dir
 }
 
-func helperMustInitialize(t *testing.T, client *integrationACPClient, stderr *bytes.Buffer) acp.InitializeResponse {
+func helperMustInitialize(t *testing.T, client *integrationACPClient, stderr *lockedBuffer) acp.InitializeResponse {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), helperIntegrationTestTimeout)
@@ -313,7 +355,7 @@ func helperMustInitialize(t *testing.T, client *integrationACPClient, stderr *by
 func helperMustNewSession(
 	t *testing.T,
 	client *integrationACPClient,
-	stderr *bytes.Buffer,
+	stderr *lockedBuffer,
 	cwd string,
 ) acp.NewSessionResponse {
 	t.Helper()
@@ -511,7 +553,7 @@ func TestIntegrationFakeCodexHelperProcess(t *testing.T) {
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 0, 4096), 1024*1024)
 	encoder := json.NewEncoder(os.Stdout)
-	threadID := fmt.Sprintf("thr-%d", instance)
+	threadCount := 0
 	turnCount := 0
 
 	for scanner.Scan() {
@@ -554,16 +596,19 @@ func TestIntegrationFakeCodexHelperProcess(t *testing.T) {
 				},
 			})
 		case "thread/start":
+			threadCount++
+			threadID := fmt.Sprintf("thr-%d-%d", instance, threadCount)
 			_ = encoder.Encode(map[string]any{
 				"id": env.ID,
 				"result": map[string]any{
 					"thread": map[string]any{
-						"id": threadID,
+						"id":        threadID,
+						"sessionId": threadID,
 					},
 					"model": "gpt-5.4",
 				},
 			})
-			if mode == "exit_after_thread_start" && instance == 2 {
+			if mode == "exit_after_thread_start" && instance == 1 {
 				writeFakeCodexHelperEvent(stateDir, fakeCodexHelperEvent{
 					Type:     "exit",
 					Instance: instance,
@@ -574,6 +619,9 @@ func TestIntegrationFakeCodexHelperProcess(t *testing.T) {
 			}
 		case "turn/start":
 			turnCount++
+			var params map[string]any
+			_ = json.Unmarshal(env.Params, &params)
+			threadID := stringValueForFakeHelper(params, "threadId")
 			turnID := fmt.Sprintf("turn-%d-%d", instance, turnCount)
 			_ = encoder.Encode(map[string]any{
 				"id": env.ID,
@@ -618,6 +666,11 @@ func TestIntegrationFakeCodexHelperProcess(t *testing.T) {
 		Reason:   reason,
 	})
 	os.Exit(0)
+}
+
+func stringValueForFakeHelper(values map[string]any, key string) string {
+	value, _ := values[key].(string)
+	return strings.TrimSpace(value)
 }
 
 func nextFakeCodexHelperInstance(stateDir string) (int, error) {

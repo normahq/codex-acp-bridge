@@ -184,6 +184,8 @@ For request types without a native ACP equivalent, the adapter uses ACP `session
 ### Prompt/session state
 
 - Session creation/resume:
+  - one app-server process serves all ACP sessions owned by a bridge process;
+    event correlation by thread, turn, and item keeps concurrent sessions isolated.
   - `session/new` starts a fresh app-server thread and returns `thread.id` as the ACP `sessionId`.
   - `session/list` maps to backend `thread/list` and returns resumable Codex threads keyed by `thread.id`.
   - `session/close` maps to backend `thread/unsubscribe` plus local bridge cleanup; it does not archive the thread.
