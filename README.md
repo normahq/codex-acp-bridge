@@ -68,6 +68,7 @@ The registry launch uses `--defer-backend` so Zed can complete ACP discovery and
 ## What The Bridge Provides
 
 - ACP `initialize`, `session/new`, `session/prompt`, `session/cancel`, `session/list`, `session/close`, and `session/resume` backed by Codex app-server threads.
+- One long-lived Codex app-server process per bridge, multiplexing independent ACP sessions as Codex threads.
 - ACP terminal authentication that delegates to the native `codex login` command without handling credentials in the bridge.
 - Durable ACP session IDs mapped directly to Codex app-server `thread.id` values.
 - ACP-native model handling through stable `session/new.configOptions` and `session/set_config_option` for `model`, with legacy `session/new.models` and `session/set_model` kept for compatibility.

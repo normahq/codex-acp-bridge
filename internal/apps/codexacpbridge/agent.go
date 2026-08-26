@@ -27,6 +27,7 @@ const (
 	decisionAbort                   = "abort"
 	mcpContractMerge                = "merge"
 	methodTurnStarted               = "turn/started"
+	methodTurnCompleted             = "turn/completed"
 	methodItemStarted               = "item/started"
 	methodItemCompleted             = "item/completed"
 	methodAgentMessageDelta         = "item/agentMessage/delta"
@@ -1907,7 +1908,7 @@ func (a *codexACPProxyAgent) handleNotification(
 				return false, "", nil, nil, err
 			}
 		}
-	case "turn/completed":
+	case methodTurnCompleted:
 		if sessionID != "" {
 			a.clearPendingRequests(sessionID)
 		}
@@ -1916,7 +1917,7 @@ func (a *codexACPProxyAgent) handleNotification(
 		stopReason := stopReasonFromTurnStatus(status)
 		errorMeta := turnErrorMeta(turn, status)
 		if errorMeta != nil {
-			a.logTerminalPromptError("turn/completed", sessionID, threadID, turnID, stopReason, errorMeta)
+			a.logTerminalPromptError(methodTurnCompleted, sessionID, threadID, turnID, stopReason, errorMeta)
 		}
 		return true, stopReason, usageFromTokenNotification(params), errorMeta, nil
 	}
@@ -2747,7 +2748,7 @@ func requiresActiveTurn(method string) bool {
 		return true
 	case "thread/tokenUsage/updated":
 		return true
-	case "turn/completed":
+	case methodTurnCompleted:
 		return true
 	default:
 		return false

@@ -93,9 +93,10 @@ acp-repl -- codex-acp-bridge
 
 ## Behavior
 
-- Starts the Codex backend with per-session working directory selection:
-  - If ACP `session/new.params.cwd` is set, that value is used for the backend process.
-  - Otherwise, the bridge process working directory is used.
+- Starts one Codex app-server backend for the bridge lifetime. Independent ACP
+  sessions share that process and remain isolated as separate Codex threads.
+- Applies ACP `session/new.params.cwd` per thread through `thread/start` and
+  `thread/resume`; otherwise the bridge process working directory is used.
 - Negotiates app-server notification opt-outs during `initialize`:
   - `--message-streaming=false` opts out `item/agentMessage/delta`.
   - `--reasoning-streaming=false` opts out `item/reasoning/textDelta` only; summary notifications stay enabled when summary thoughts are enabled so completed summary parts can publish incrementally.
@@ -104,7 +105,7 @@ acp-repl -- codex-acp-bridge
   - `--reasoning-thoughts=off` opts out all reasoning delta notifications.
 - Sends `turn/start.summary` using `--reasoning-summary` for each prompt. When a thread already exists and model or reasoning effort changes, persists the same summary mode through `thread/settings/update.summary`.
 - Opens ACP agent-side stdio connection for clients.
-- Creates one backend session per ACP session.
+- Creates one Codex thread per ACP session on the shared backend.
 - `session/new` returns the app-server thread id (`thread.id`) as the ACP `sessionId`.
 - Supports ACP `session/list` using backend `thread/list`.
   - `session/list` returns resumable Codex threads, not just sessions created by the current bridge process.
