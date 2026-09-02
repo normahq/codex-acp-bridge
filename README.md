@@ -29,13 +29,13 @@ npx -y @normahq/codex-acp-bridge@latest
 Inspect the ACP handshake:
 
 ```bash
-npx -y @normahq/acp-dump -- npx -y @normahq/codex-acp-bridge@latest
+npx -y @baldaworks/acpdump -- npx -y @normahq/codex-acp-bridge@latest
 ```
 
 Start an interactive ACP session:
 
 ```bash
-npx -y @normahq/acp-repl -- npx -y @normahq/codex-acp-bridge@latest
+npx -y @baldaworks/acpchat -- npx -y @normahq/codex-acp-bridge@latest
 ```
 
 ## Installation

@@ -34,24 +34,24 @@ codex-acp-bridge --reasoning-streaming=false
 
 ## ACP Tooling Examples
 
-Use `acp-dump` to inspect ACP initialize/session behavior:
+Use `acpdump` to inspect ACP initialize/session behavior:
 
 ```bash
-npx -y @normahq/acp-dump -- npx -y @normahq/codex-acp-bridge@latest
-npx -y @normahq/acp-dump --json -- npx -y @normahq/codex-acp-bridge@latest
+npx -y @baldaworks/acpdump -- npx -y @normahq/codex-acp-bridge@latest
+npx -y @baldaworks/acpdump --json -- npx -y @normahq/codex-acp-bridge@latest
 ```
 
-Use `acp-repl` for an interactive ACP prompt session:
+Use `acpchat` for an interactive ACP prompt session:
 
 ```bash
-npx -y @normahq/acp-repl -- npx -y @normahq/codex-acp-bridge@latest
+npx -y @baldaworks/acpchat -- npx -y @normahq/codex-acp-bridge@latest
 ```
 
 If tools are installed globally:
 
 ```bash
-acp-dump -- codex-acp-bridge
-acp-repl -- codex-acp-bridge
+acpdump -- codex-acp-bridge
+acpchat -- codex-acp-bridge
 ```
 
 ## Flags
