@@ -22,11 +22,11 @@ go tool golangci-lint run
 - Preserve public `pkg/cobracmd.New`/`Command` signatures, command import/install paths, stdio, signal cancellation and failure exit status. Delegate to canonical code; do not copy its internal bridge implementation.
 - Keep the exact canonical dependency pinned in go.mod. No committed replace directive. Canonical dependency versions and tags must exist before publishing this module.
 - ACP transport/model/metadata behavior is maintained in the canonical repository. Preserve its wire compatibility through adapters.
-- Update every affected doc: README, command README, usage/JSON API pointers, Go package doc.go, release sync instructions and agent guides.
+- Update every affected doc: README, command README, usage/JSON API pointers, Go package doc.go, archive policy and agent guides.
 
 ## Release
 
-- `sync-canonical-release.yml` follows published canonical `vX.Y.Z` releases hourly or by dispatch, using own-repository `GITHUB_TOKEN`. It tests, commits dependency changes and atomically creates an immutable matching tag.
+- This repository is archived and read-only. Final Go/GitHub release v1.10.1 is pinned to canonical v1.10.1. Synchronization and release automation are retired; direct all new work to baldaworks/codex-acp.
 - This repository does not publish npm or build an independent runtime. Canonical npm aliases share `@baldaworks/codex-acp-*` packages.
 - Preserve all historical tags and release assets. Legacy archives reuse canonical native bytes under old names; retries verify rather than replace accepted assets.
 - See `docs/releasing.md` and canonical migration/release docs. File implementation issues and PRs in baldaworks/codex-acp.

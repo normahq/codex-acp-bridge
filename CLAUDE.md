@@ -67,7 +67,9 @@ public import paths. Its constructors delegate to the pinned canonical
 `github.com/baldaworks/codex-acp/pkg/cobracmd`; there is no copied bridge runtime.
 Use idiomatic Go, Conventional Commits and the canonical project's Beads tracker.
 
-Only synchronize published canonical versions with standard `vX.Y.Z` tags.
+This repository is archived and read-only, frozen at Go/GitHub release v1.10.1.
+Synchronization and release automation are retired; do all new work in the
+canonical repository.
 Never commit a Go replace directive or overwrite historical tags/assets.
 The old repository does not publish npm. See `AGENTS.md`, `docs/releasing.md`
 and the canonical repository for runtime changes, ACP contracts and migration docs.

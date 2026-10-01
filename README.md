@@ -1,4 +1,7 @@
-# codex-acp-bridge compatibility module
+# codex-acp-bridge — archived
+
+**Archived and read-only.** The final legacy Go/GitHub release is `v1.10.1`.
+This repository receives no further synchronization or releases.
 
 The project is maintained at [baldaworks/codex-acp](https://github.com/baldaworks/codex-acp).
 This repository preserves the original Go module identity, command/import
@@ -21,10 +24,13 @@ go install github.com/normahq/codex-acp-bridge/cmd/codex-acp-bridge@latest
 npx -y @normahq/codex-acp-bridge@latest
 npm install -g @normahq/codex-acp-bridge@latest
 codex-acp-bridge version
-codex-acp-bridge --defer-backend
+codex-acp-bridge
 ```
 
-Use `@v1.9.3` for pinned Go installation and `@1.9.3` for pinned npm execution.
+The old Go path stays at `v1.10.1`, including `@latest`. Use `@v1.10.1`
+for pinned Go installation. The deprecated npm alias is published from the
+canonical repository and continues to follow its releases; use `@1.10.1`
+for pinned npm execution.
 Go executables install into `GOBIN` or `$(go env GOPATH)/bin`; include it in `PATH`.
 Codex CLI and host authentication remain required for sessions. Run the command's
 `login` subcommand or `codex login` to authenticate.
@@ -41,7 +47,7 @@ Existing code may continue importing
 `Command()` constructors return the canonical `*cobra.Command`. The original
 `cmd/codex-acp-bridge/cmd` import path also retains `Command()`. No consumer
 `replace` directive is required. This module keeps its original `module` path
-and pins `github.com/baldaworks/codex-acp` at the synchronized release.
+and pins `github.com/baldaworks/codex-acp` at the final legacy release `v1.10.1`.
 
 New code should import `github.com/baldaworks/codex-acp/pkg/cobracmd` directly.
 Both entrypoints use the canonical flags, command help and default agent name
@@ -50,17 +56,17 @@ the historical `codex-acp-bridge/*` prefix and existing protocol contracts.
 
 ## Releases and contributions
 
-The canonical repository owns version selection, implementation, native builds
-and npm releases. This repository's hourly/manual `sync-canonical-release.yml`
-checks a published canonical release, pins its Go dependency, tests the adapters
-and creates a matching immutable `vX.Y.Z` tag with its own repository token.
-Synchronization is eventual; a new canonical release may precede its legacy tag.
+All ongoing development, Go releases, native builds and npm publication belong
+to [baldaworks/codex-acp](https://github.com/baldaworks/codex-acp).
+The synchronization workflow has been retired. Legacy Go tags and GitHub
+releases end at `v1.10.1`; use the canonical paths for future Go updates.
 
-Legacy GitHub archives retain the `codex-acp-bridge-*` names and executable,
-using the exact canonical native binary bytes. Old tags and archive URLs remain
-unchanged. The repository stays writable for adapter synchronization.
+Existing Git history, tags and archive URLs remain available. Legacy GitHub
+archives retain their `codex-acp-bridge-*` names and contain the matching
+canonical native binary bytes. The deprecated npm alias remains available
+through canonical publishing, independently of this archived repository.
 
 File issues and implementation PRs at https://github.com/baldaworks/codex-acp.
 See [usage](docs/usage.md), [JSON API](docs/json-api.md),
-[release synchronization](docs/releasing.md) and the
+[archive policy](docs/releasing.md) and the
 [full migration policy](https://github.com/baldaworks/codex-acp/blob/main/docs/migration.md).

@@ -1,6 +1,7 @@
 # Legacy JSON API compatibility
 
-The Go adapters and legacy npm command use the canonical ACP projection.
+The archived Go adapters use the canonical ACP projection at `v1.10.1`.
+The deprecated npm command continues to follow canonical releases.
 The current specification and code-first schema inventory are maintained at
 [baldaworks/codex-acp/docs/json-api.md](https://github.com/baldaworks/codex-acp/blob/main/docs/json-api.md).
 The bridge implementation and protocol tests are in the canonical repository.
