@@ -34,6 +34,7 @@ jobs:
         id: sync
         env:
           TARGET_VERSION: ${{ inputs.version }}
+          GOTOOLCHAIN: auto
         run: ./scripts/sync-release.sh "$TARGET_VERSION"
       - name: Publish legacy archive names
         env:

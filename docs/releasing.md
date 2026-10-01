@@ -8,7 +8,7 @@ adapters. Preserve all existing tags, npm versions and historical GitHub assets.
 `sync-canonical-release.yml` runs hourly at minute 23 or by manual dispatch:
 
 ```bash
-gh workflow run sync-canonical-release.yml --repo normahq/codex-acp-bridge -f version=v1.9.3
+gh workflow run sync-canonical-release.yml --repo normahq/codex-acp-bridge -f version=v1.10.1
 ```
 
 Omit `version` to select the latest published canonical release. The workflow
@@ -34,3 +34,7 @@ plus archive checksums and preserved historical tag/asset inventories. Registry
 publication and trusted publishers belong to the canonical workflow. Refer to
 [canonical releasing](https://github.com/baldaworks/codex-acp/blob/main/docs/releasing.md)
 and [migration policy](https://github.com/baldaworks/codex-acp/blob/main/docs/migration.md).
+
+The synchronization step uses `GOTOOLCHAIN=auto` so Go can select the
+toolchain required by the canonical dependency before updating the legacy
+module minimum. Ordinary CI then uses the updated `go.mod` baseline.
