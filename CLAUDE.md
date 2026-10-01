@@ -5,6 +5,8 @@ This file provides instructions and context for AI coding agents working on this
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
 ## Beads Issue Tracker
 
+Run Beads commands from the canonical baldaworks/codex-acp checkout; keep migration and compatibility tasks there rather than copying its database.
+
 This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
 
 ### Quick Reference
@@ -33,7 +35,7 @@ bd close <id>         # Complete work
 3. **Update issue status** - Close finished work, update in-progress items
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
-   git pull --rebase
+   git pull --no-rebase
    bd dolt push
    git push
    git status  # MUST show "up to date with origin"
@@ -52,18 +54,20 @@ bd close <id>         # Complete work
 
 ## Build & Test
 
-_Add your build and test commands here_
-
 ```bash
-# Example:
-# npm install
-# npm test
+go test -race ./...
+go tool golangci-lint run
+go build ./cmd/codex-acp-bridge
 ```
 
-## Architecture Overview
+## Architecture and Conventions
 
-_Add a brief overview of your project architecture_
+This module preserves `github.com/normahq/codex-acp-bridge` installation and
+public import paths. Its constructors delegate to the pinned canonical
+`github.com/baldaworks/codex-acp/pkg/cobracmd`; there is no copied bridge runtime.
+Use idiomatic Go, Conventional Commits and the canonical project's Beads tracker.
 
-## Conventions & Patterns
-
-_Add your project-specific conventions here_
+Only synchronize published canonical versions with standard `vX.Y.Z` tags.
+Never commit a Go replace directive or overwrite historical tags/assets.
+The old repository does not publish npm. See `AGENTS.md`, `docs/releasing.md`
+and the canonical repository for runtime changes, ACP contracts and migration docs.

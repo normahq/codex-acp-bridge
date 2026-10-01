@@ -53,3 +53,6 @@ Thumbs.db
 
 # Beads / Dolt files (added by bd init)
 .beads-credential-key
+
+# Python release helper cache
+__pycache__/

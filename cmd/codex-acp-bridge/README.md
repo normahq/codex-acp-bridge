@@ -1,7 +1,17 @@
-# codex-acp-bridge command
+# Legacy codex-acp-bridge command
 
-The canonical bridge documentation now lives at the repository root:
+```bash
+go install github.com/normahq/codex-acp-bridge/cmd/codex-acp-bridge@latest
+codex-acp-bridge version
+codex-acp-bridge --defer-backend
+```
 
-- [../../README.md](../../README.md)
+The command preserves the original installation path and delegates to the
+canonical public Cobra command through this module's pinned dependency.
+Signal handling, stdio and failure exit status remain supported. The command
+help and default agent identity use the canonical `codex-acp` name.
 
-This command path is kept only as a lightweight reference for existing links.
+For new installations use
+`go install github.com/baldaworks/codex-acp/cmd/codex-acp@latest`.
+See [compatibility and installation](../../README.md) and
+[canonical usage](https://github.com/baldaworks/codex-acp/blob/main/docs/usage.md).

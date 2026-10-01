@@ -16,35 +16,25 @@ go test -race ./...
 go tool golangci-lint run
 ```
 
-## Logging Policy
+## Compatibility and Ownership
 
-- Allowed: `github.com/rs/zerolog`, `log/slog`.
-- Disallowed: `logrus`, `zap`, direct standard `log` usage.
-- Initialize logging through `internal/logging.Init()`.
-- Prefer structured logging fields over formatted strings.
-
-## Bridge Guardrails
-
-- Keep ACP contract compatibility stable.
-- Keep strict validation for `session/new._meta.codex`.
-- Keep model handling ACP-native (`session/set_config_option` with config ID `model`), keep legacy `session/set_model` compatibility, and do not add bridge-specific model CLI flags.
-- Keep MCP transport constraints aligned with implementation (`stdio` and `http`, reject `sse`).
-
-## Documentation
-
-- Product/usage docs are rooted in `README.md`.
-- Protocol details are in:
-  - `docs/usage.md`
-  - `docs/json-api.md`
+- Canonical implementation: `github.com/baldaworks/codex-acp`. This repository retains original module identity `github.com/normahq/codex-acp-bridge` and thin CLI/public API adapters.
+- Preserve public `pkg/cobracmd.New`/`Command` signatures, command import/install paths, stdio, signal cancellation and failure exit status. Delegate to canonical code; do not copy its internal bridge implementation.
+- Keep the exact canonical dependency pinned in go.mod. No committed replace directive. Canonical dependency versions and tags must exist before publishing this module.
+- ACP transport/model/metadata behavior is maintained in the canonical repository. Preserve its wire compatibility through adapters.
+- Update every affected doc: README, command README, usage/JSON API pointers, Go package doc.go, release sync instructions and agent guides.
 
 ## Release
 
-- Omnidist profile is authoritative (`.omnidist/omnidist.yaml`).
-- Version source is Git tags (`version.source: git-tag`).
-- Publish flow is tag-driven via GitHub Actions release workflow.
+- `sync-canonical-release.yml` follows published canonical `vX.Y.Z` releases hourly or by dispatch, using own-repository `GITHUB_TOKEN`. It tests, commits dependency changes and atomically creates an immutable matching tag.
+- This repository does not publish npm or build an independent runtime. Canonical npm aliases share `@baldaworks/codex-acp-*` packages.
+- Preserve all historical tags and release assets. Legacy archives reuse canonical native bytes under old names; retries verify rather than replace accepted assets.
+- See `docs/releasing.md` and canonical migration/release docs. File implementation issues and PRs in baldaworks/codex-acp.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
 ## Beads Issue Tracker
+
+Run Beads commands from the canonical baldaworks/codex-acp checkout; keep migration and compatibility tasks there rather than copying its database.
 
 This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
 
@@ -74,7 +64,7 @@ bd close <id>         # Complete work
 3. **Update issue status** - Close finished work, update in-progress items
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
-   git pull --rebase
+   git pull --no-rebase
    bd dolt push
    git push
    git status  # MUST show "up to date with origin"
